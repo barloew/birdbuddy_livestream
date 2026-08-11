@@ -27,10 +27,11 @@ without reaching for the Bird Buddy app.
 
 ## What this is not
 
-This integration does the **livestream only**. For battery level, food level,
-signal strength and the bird postcards, install [ha-birdbuddy][ha-birdbuddy]
-alongside it. Both can run at the same time without interfering; your feeder
-will simply appear as two devices, one per integration.
+This integration does the **livestream only**. For battery level, charging
+status, signal strength, firmware updates and the most recent bird visitor,
+install [ha-birdbuddy][ha-birdbuddy] alongside it. Both can run at the same time
+without interfering; your feeder will simply appear as two devices, one per
+integration.
 
 ---
 
