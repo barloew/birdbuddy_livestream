@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Bird Buddy-account",
+        "description": "Log in met je Bird Buddy-account. Accounts die via Google of Facebook zijn aangemaakt werken niet; nodig in dat geval een apart e-mailaccount uit als lid.",
+        "data": {
+          "email": "E-mailadres",
+          "password": "Wachtwoord"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "De Bird Buddy API is niet bereikbaar.",
+      "invalid_auth": "Onjuist e-mailadres of wachtwoord.",
+      "no_feeders": "Geen feeders gevonden op dit account."
+    },
+    "abort": {
+      "already_configured": "Dit account is al ingesteld."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Livestream-opties",
+        "description": "De feeder streamt op accu, dus de livestream wordt automatisch gestopt. Vul een go2rtc-adres in (bijvoorbeeld http://192.168.1.10:1984) om de stream daarlangs te leiden; dat geeft een stabieler beeld en werkt in elke browser.",
+        "data": {
+          "auto_off": "Stop de stream na",
+          "start_timeout": "Wacht maximaal op de stream",
+          "go2rtc_url": "go2rtc-adres (optioneel)",
+          "go2rtc_rtsp_port": "go2rtc RTSP-poort",
+          "go2rtc_input": "go2rtc ffmpeg-sjabloon (optioneel)",
+          "transcode": "Omzetten naar H.264"
+        },
+        "data_description": {
+          "auto_off": "Streamen trekt de accu snel leeg.",
+          "start_timeout": "Een slapende feeder met een zwak signaal heeft soms ruim een minuut nodig.",
+          "go2rtc_url": "Leeg laten om de HLS-stream rechtstreeks door Home Assistant te laten lezen.",
+          "go2rtc_input": "Naam van een ffmpeg-sjabloon uit go2rtc.yaml. Leeg laten tenzij je zeker weet dat je het nodig hebt.",
+          "transcode": "De feeder zendt HEVC, wat zonder omzetting alleen in Safari speelt."
+        }
+      }
+    }
+  },
+  "entity": {
+    "camera": {
+      "livestream": {
+        "state_attributes": {
+          "session_active": { "name": "Sessie actief" },
+          "starting": { "name": "Bezig met starten" },
+          "last_error": { "name": "Laatste fout" }
+        }
+      }
+    }
+  }
+}
