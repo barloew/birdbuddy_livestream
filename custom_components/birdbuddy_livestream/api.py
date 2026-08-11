@@ -1,0 +1,341 @@
+"""Manages the account-wide Bird Buddy watching session."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from urllib.parse import urljoin
+
+import aiohttp
+from birdbuddy.client import BirdBuddy
+
+from .const import (
+    DEFAULT_START_TIMEOUT,
+    KEEPALIVE_INTERVAL,
+    POLL_INTERVAL,
+    WARMUP_MIN_SEGMENTS,
+    WARMUP_POLL,
+    WARMUP_TIMEOUT,
+    WATCHING_COOLDOWN,
+    WATCHING_KEEP,
+    WATCHING_START,
+    WATCHING_START_CHECK,
+    WATCHING_STOP,
+)
+
+LOGGER = logging.getLogger(__name__)
+
+
+class WatchingError(Exception):
+    """The feeder could not set up the livestream."""
+
+
+@dataclass(slots=True)
+class ActiveStream:
+    """A running watching session."""
+
+    feeder_id: str
+    watching_id: str
+    stream_url: str
+
+
+class BirdBuddyWatcher:
+    """Wraps pybirdbuddy and adds the watching mutations.
+
+    Bird Buddy allows only one active watching session per account, and the
+    session mutations take no feederId. This class therefore serialises all
+    access, tracks which feeder currently holds the session, and runs the
+    keepalive.
+    """
+
+    def __init__(
+        self, client: BirdBuddy, session: aiohttp.ClientSession | None = None
+    ) -> None:
+        """Initialise the watcher."""
+        self._client = client
+        self._session = session
+        self._lock = asyncio.Lock()
+        self._active: ActiveStream | None = None
+        self._keepalive_task: asyncio.Task | None = None
+        self._lost_listeners: dict[str, Callable[[], None]] = {}
+        self._url_listeners: dict[str, Callable[[str], None]] = {}
+
+    @property
+    def client(self) -> BirdBuddy:
+        """Return the underlying pybirdbuddy client."""
+        return self._client
+
+    @property
+    def active(self) -> ActiveStream | None:
+        """Return the running session, if any."""
+        return self._active
+
+    def is_active(self, feeder_id: str) -> bool:
+        """Return whether this specific feeder is currently streaming."""
+        return self._active is not None and self._active.feeder_id == feeder_id
+
+    # -- listeners ---------------------------------------------------------
+
+    def register_lost_listener(
+        self, feeder_id: str, callback: Callable[[], None]
+    ) -> None:
+        """Register a callback for when the session is dropped."""
+        self._lost_listeners[feeder_id] = callback
+
+    def register_url_listener(
+        self, feeder_id: str, callback: Callable[[str], None]
+    ) -> None:
+        """Register a callback for when a fresh stream URL arrives."""
+        self._url_listeners[feeder_id] = callback
+
+    def unregister_listeners(self, feeder_id: str) -> None:
+        """Remove all callbacks for a feeder."""
+        self._lost_listeners.pop(feeder_id, None)
+        self._url_listeners.pop(feeder_id, None)
+
+    # -- starting ----------------------------------------------------------
+
+    async def async_start(
+        self, feeder_id: str, timeout: int = DEFAULT_START_TIMEOUT
+    ) -> str:
+        """Start the stream and return the HLS master playlist URL."""
+        async with self._lock:
+            if self._active is not None:
+                if self._active.feeder_id == feeder_id:
+                    return self._active.stream_url
+                LOGGER.debug(
+                    "Session held by feeder %s, stopping it first",
+                    self._active.feeder_id,
+                )
+                await self._async_stop_locked()
+
+            variables = {"startWatchingInput": {"feederId": feeder_id}}
+            result = await self._request(WATCHING_START, variables, "watchingStartV2")
+
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + timeout
+
+            while True:
+                typename = result.get("__typename")
+                watching = result.get("watching") or {}
+                LOGGER.debug("watching %s / state=%s", typename, watching.get("state"))
+
+                if typename == "WatchingActiveResult" and watching.get("streamUrl"):
+                    self._active = ActiveStream(
+                        feeder_id=feeder_id,
+                        watching_id=watching["id"],
+                        stream_url=watching["streamUrl"],
+                    )
+                    # Start sending keepalives right away. The warm-up below
+                    # easily outlasts the server-side timeout, and without
+                    # keepalives the session dies halfway through it.
+                    self._start_keepalive()
+
+                    # ACTIVE only means the session was set up. The feeder
+                    # delivers a single fragment and then goes quiet for about
+                    # ten seconds.
+                    await self._async_wait_for_segments(self._active.stream_url)
+                    return self._active.stream_url
+
+                if typename == "WatchingFailedResult":
+                    reason = result.get("failedReason")
+                    await self._async_cooldown_locked()
+                    raise WatchingError(
+                        f"Bird Buddy refused the stream: {reason}. "
+                        "This often fails when the Wi-Fi signal is weak."
+                    )
+
+                if loop.time() > deadline:
+                    await self._async_cooldown_locked()
+                    raise WatchingError(
+                        f"No active stream within {timeout}s (last: {typename})"
+                    )
+
+                await asyncio.sleep(POLL_INTERVAL)
+                result = await self._request(
+                    WATCHING_START_CHECK, variables, "watchingStartCheck"
+                )
+
+    async def _async_wait_for_segments(self, master_url: str) -> None:
+        """Wait until the HLS playlist actually keeps producing segments.
+
+        Gives up after the timeout: a stuttering stream beats no stream.
+        """
+        if self._session is None:
+            return
+
+        child_url: str | None = None
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + WARMUP_TIMEOUT
+
+        while loop.time() < deadline:
+            try:
+                if child_url is None:
+                    async with self._session.get(master_url) as resp:
+                        master = await resp.text()
+                    variant = next(
+                        (
+                            line.strip()
+                            for line in master.splitlines()
+                            if line.strip() and not line.startswith("#")
+                        ),
+                        None,
+                    )
+                    if variant is None:
+                        return
+                    child_url = urljoin(master_url, variant)
+
+                async with self._session.get(child_url) as resp:
+                    playlist = await resp.text()
+            except (aiohttp.ClientError, TimeoutError) as err:
+                LOGGER.debug("Could not fetch playlist: %s", err)
+                await asyncio.sleep(WARMUP_POLL)
+                continue
+
+            segments = [
+                line
+                for line in playlist.splitlines()
+                if line.strip() and not line.startswith("#")
+            ]
+            LOGGER.debug("Warm-up: %d segments in the playlist", len(segments))
+
+            if len(segments) >= WARMUP_MIN_SEGMENTS:
+                LOGGER.info("Playlist is running, releasing the stream URL")
+                return
+
+            await asyncio.sleep(WARMUP_POLL)
+
+        LOGGER.warning(
+            "Playlist stayed thin during warm-up; the stream may stutter"
+        )
+
+    # -- keepalive ---------------------------------------------------------
+
+    def _start_keepalive(self) -> None:
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            return
+        self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+
+    def _cancel_keepalive(self) -> None:
+        if self._keepalive_task is not None and not self._keepalive_task.done():
+            self._keepalive_task.cancel()
+        self._keepalive_task = None
+
+    async def _keepalive_loop(self) -> None:
+        """Send watchingActiveKeep until the session ends.
+
+        Deliberately runs without the lock: async_start holds it during the
+        warm-up, which is exactly when keepalives must keep flowing.
+        """
+        while True:
+            await asyncio.sleep(KEEPALIVE_INTERVAL)
+
+            if self._active is None:
+                return
+
+            try:
+                result = await self._request(WATCHING_KEEP, None, "watchingActiveKeep")
+            except asyncio.CancelledError:
+                raise
+            except Exception as err:  # noqa: BLE001
+                LOGGER.warning("Keepalive failed: %s", err)
+                self._notify_lost()
+                return
+
+            state = (result or {}).get("state")
+            LOGGER.debug("Keepalive: state=%s", state)
+
+            if state != "ACTIVE":
+                LOGGER.info("Session is now %s, keepalive stops", state)
+                self._notify_lost()
+                return
+
+            await self._async_refresh_url()
+
+    async def _async_refresh_url(self) -> None:
+        """Fetch a fresh stream URL and hand it to the listener when it changes.
+
+        The Kinesis URL is a temporary session address. Once it expires it is
+        dead for good and reconnecting does not help; whoever keeps using it
+        ends up with an ffmpeg process that receives zero bytes.
+        """
+        if self._active is None:
+            return
+
+        feeder_id = self._active.feeder_id
+        variables = {"startWatchingInput": {"feederId": feeder_id}}
+
+        try:
+            result = await self._request(
+                WATCHING_START_CHECK, variables, "watchingStartCheck"
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("Could not fetch a fresh URL: %s", err)
+            return
+
+        if result.get("__typename") != "WatchingActiveResult":
+            return
+
+        watching = result.get("watching") or {}
+        fresh = watching.get("streamUrl")
+        if not fresh or self._active is None or fresh == self._active.stream_url:
+            return
+
+        LOGGER.debug("Fresh stream URL received for %s", feeder_id)
+        self._active.stream_url = fresh
+
+        if (callback := self._url_listeners.get(feeder_id)) is not None:
+            callback(fresh)
+
+    def _notify_lost(self) -> None:
+        """The server dropped the session."""
+        if self._active is None:
+            return
+        feeder_id = self._active.feeder_id
+        self._active = None
+        if (callback := self._lost_listeners.get(feeder_id)) is not None:
+            callback()
+
+    # -- stopping ----------------------------------------------------------
+
+    async def async_stop(self) -> list[str]:
+        """End the session. Returns photos taken during the stream."""
+        async with self._lock:
+            return await self._async_stop_locked()
+
+    async def _async_stop_locked(self) -> list[str]:
+        self._cancel_keepalive()
+
+        if self._active is None:
+            return []
+
+        self._active = None
+        try:
+            result = await self._request(WATCHING_STOP, None, "watchingActiveStop")
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("watchingActiveStop failed, falling back to cooldown")
+            await self._async_cooldown_locked()
+            return []
+
+        await self._async_cooldown_locked()
+        return (result or {}).get("imageUrls") or []
+
+    async def _async_cooldown_locked(self) -> None:
+        try:
+            await self._request(WATCHING_COOLDOWN, None, "watchingCooldown")
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("watchingCooldown failed", exc_info=True)
+
+    # -- transport ---------------------------------------------------------
+
+    async def _request(
+        self, query: str, variables: dict | None, subscript: str
+    ) -> dict:
+        kwargs: dict = {"query": query, "subscript": subscript}
+        if variables is not None:
+            kwargs["variables"] = variables
+        return await self._client._make_request(**kwargs)  # noqa: SLF001

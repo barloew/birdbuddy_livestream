@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Bird Buddy account",
+        "description": "Sign in with your Bird Buddy account. Accounts created through Google or Facebook sign-in are not supported; invite a separate email account as a member instead.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the Bird Buddy API.",
+      "invalid_auth": "Invalid email or password.",
+      "no_feeders": "No feeders found on this account."
+    },
+    "abort": {
+      "already_configured": "This account is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Livestream options",
+        "description": "The feeder streams on battery power, so the livestream is stopped automatically. Set a go2rtc address (for example http://192.168.1.10:1984) to route the stream through it, which is more stable and works in every browser.",
+        "data": {
+          "auto_off": "Stop the stream after",
+          "start_timeout": "Wait for the stream at most",
+          "go2rtc_url": "go2rtc address (optional)",
+          "go2rtc_rtsp_port": "go2rtc RTSP port",
+          "go2rtc_input": "go2rtc ffmpeg template (optional)",
+          "transcode": "Transcode to H.264"
+        },
+        "data_description": {
+          "auto_off": "Streaming drains the battery quickly.",
+          "start_timeout": "A sleeping feeder on a weak signal may need well over a minute.",
+          "go2rtc_url": "Leave empty to let Home Assistant read the HLS stream directly.",
+          "go2rtc_input": "Name of an ffmpeg template defined in go2rtc.yaml. Leave empty unless you know you need it.",
+          "transcode": "The feeder sends HEVC, which only plays in Safari without transcoding."
+        }
+      }
+    }
+  },
+  "entity": {
+    "camera": {
+      "livestream": {
+        "state_attributes": {
+          "session_active": { "name": "Session active" },
+          "starting": { "name": "Starting" },
+          "last_error": { "name": "Last error" }
+        }
+      }
+    }
+  }
+}
