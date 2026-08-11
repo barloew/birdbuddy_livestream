@@ -1,5 +1,7 @@
 # Bird Buddy Livestream
 
+<img src="custom_components/birdbuddy_livestream/brand/logo.png" alt="Bird Buddy Livestream" width="128">
+
 [![hacs][hacs-badge]][hacs-url]
 [![validate][validate-badge]][validate-url]
 [![release][release-badge]][release-url]
@@ -52,7 +54,14 @@ integration stops the stream automatically after five minutes for this reason.
 
 ## Installation
 
-### Through HACS
+### HACS (recommended)
+
+[![Add repository to my Home Assistant][my-ha-badge]][my-ha-url]
+
+Click the button above to open this repository straight in your own Home
+Assistant, then click **Download**. Afterwards, **restart Home Assistant**.
+
+Prefer to do it by hand?
 
 1. Open **HACS** in Home Assistant.
 2. Click the three dots in the top right, then **Custom repositories**.
@@ -204,6 +213,8 @@ Hansche, and [go2rtc][go2rtc] by AlexxIT.
 
 Not affiliated with or endorsed by Bird Buddy.
 
+[my-ha-badge]: https://my.home-assistant.io/badges/hacs_repository.svg
+[my-ha-url]: https://my.home-assistant.io/redirect/hacs_repository/?owner=barloew&repository=birdbuddy_livestream&category=integration
 [hacs-badge]: https://img.shields.io/badge/HACS-Custom-41BDF5.svg
 [hacs-url]: https://github.com/hacs/integration
 [validate-badge]: https://github.com/barloew/birdbuddy_livestream/actions/workflows/validate.yml/badge.svg
