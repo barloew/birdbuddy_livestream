@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
-"""
-Diagnose voor de Bird Buddy livestream.
+"""Diagnostics for the Bird Buddy livestream.
 
-Start een watching-sessie, haalt de HLS-playlist op en kijkt of het een echte
-live-playlist is of een afgesloten clip. Dat verschil bepaalt waarom een stream
-na een paar seconden stopt.
+Starts a watching session, fetches the HLS playlist and reports whether it is a
+genuine live playlist or a closed clip. That difference explains why a stream
+stops after a few seconds.
 
-Installeren en draaien:
+Install and run:
 
     python3 -m venv ~/bb-venv
     ~/bb-venv/bin/pip install pybirdbuddy
-    export BB_EMAIL="jij@example.com"
+    export BB_EMAIL="you@example.com"
     export BB_PASSWORD="...."
     ~/bb-venv/bin/python birdbuddy_probe.py
+
+Close the mobile app and turn the Home Assistant camera off first, or they will
+compete for the same session.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from birdbuddy.client import BirdBuddy
 
 POLL_INTERVAL = 3
 START_TIMEOUT = 120
-# Tussen de twee metingen van de playlist.
+# Delay between the two playlist samples.
 OBSERVE_SECONDS = 12
 
 _FRAGMENTS = """
@@ -104,11 +106,12 @@ mutation watchingCooldown {
 
 
 def log(msg: str) -> None:
+    """Write progress to stderr so stdout stays clean."""
     print(msg, file=sys.stderr, flush=True)
 
 
 async def start_stream(client: BirdBuddy, feeder_id: str) -> str:
-    """Start de sessie en geeft de HLS master playlist URL terug."""
+    """Start the session and return the HLS master playlist URL."""
     variables = {"startWatchingInput": {"feederId": feeder_id}}
     result = await client._make_request(  # noqa: SLF001
         query=Q_START, variables=variables, subscript="watchingStartV2"
@@ -126,10 +129,10 @@ async def start_stream(client: BirdBuddy, feeder_id: str) -> str:
             return watching["streamUrl"]
 
         if typename == "WatchingFailedResult":
-            raise RuntimeError(f"stream geweigerd: {result.get('failedReason')}")
+            raise RuntimeError(f"stream refused: {result.get('failedReason')}")
 
         if loop.time() > deadline:
-            raise TimeoutError(f"geen ACTIVE stream binnen {START_TIMEOUT}s")
+            raise TimeoutError(f"no ACTIVE stream within {START_TIMEOUT}s")
 
         await asyncio.sleep(POLL_INTERVAL)
         result = await client._make_request(  # noqa: SLF001
@@ -138,7 +141,7 @@ async def start_stream(client: BirdBuddy, feeder_id: str) -> str:
 
 
 def _redact(playlist: str) -> str:
-    """Kort de segment-URLs in; die zijn lang en bevatten een sessietoken."""
+    """Shorten segment URLs, which are long and carry a session token."""
     out = []
     for line in playlist.splitlines():
         stripped = line.strip()
@@ -151,7 +154,7 @@ def _redact(playlist: str) -> str:
 
 
 def summarise(playlist: str) -> dict:
-    """Haal de kenmerken uit een HLS child playlist."""
+    """Extract the characteristics of an HLS child playlist."""
     lines = [line.strip() for line in playlist.splitlines() if line.strip()]
     segments = [line for line in lines if not line.startswith("#")]
     sequence = next(
@@ -181,7 +184,7 @@ def summarise(playlist: str) -> dict:
 
 
 async def analyse(session: aiohttp.ClientSession, master_url: str) -> None:
-    """Vergelijk de playlist met zichzelf, een paar seconden later."""
+    """Compare the playlist against itself a few seconds later."""
     async with session.get(master_url) as resp:
         master = await resp.text()
 
@@ -189,11 +192,15 @@ async def analyse(session: aiohttp.ClientSession, master_url: str) -> None:
     print(master.strip())
 
     child_rel = next(
-        (ln.strip() for ln in master.splitlines() if ln.strip() and not ln.startswith("#")),
+        (
+            ln.strip()
+            for ln in master.splitlines()
+            if ln.strip() and not ln.startswith("#")
+        ),
         None,
     )
     if not child_rel:
-        print("\nGeen child playlist gevonden in de master.")
+        print("\nNo child playlist found in the master.")
         return
 
     child_url = urljoin(master_url, child_rel)
@@ -201,67 +208,81 @@ async def analyse(session: aiohttp.ClientSession, master_url: str) -> None:
     async with session.get(child_url) as resp:
         first = await resp.text()
 
-    print("\n--- child playlist, meting 1 (segment-URLs ingekort) ---")
+    print("\n--- child playlist, sample 1 (segment URLs shortened) ---")
     print(_redact(first))
 
-    log(f"\nEerste meting gedaan, {OBSERVE_SECONDS}s wachten...")
+    log(f"\nFirst sample taken, waiting {OBSERVE_SECONDS}s...")
     await asyncio.sleep(OBSERVE_SECONDS)
 
     async with session.get(child_url) as resp:
         second = await resp.text()
 
-    print("\n--- child playlist, meting 2 (segment-URLs ingekort) ---")
+    print("\n--- child playlist, sample 2 (segment URLs shortened) ---")
     print(_redact(second))
 
     a, b = summarise(first), summarise(second)
 
-    print("\n--- child playlist ---")
-    print(f"                    meting 1      meting 2")
-    print(f"  segmenten         {a['segments']:<13} {b['segments']}")
-    print(f"  media-sequence    {a['sequence']:<13} {b['sequence']}")
-    print(f"  laatste segment   {str(a['last'])[-28:]}")
+    print("\n--- comparison ---")
+    print("                    sample 1      sample 2")
+    print(f"  segments          {a['segments']:<13} {b['segments']}")
+    print(f"  media sequence    {a['sequence']:<13} {b['sequence']}")
+    print(f"  last segment      {str(a['last'])[-28:]}")
     print(f"                    {str(b['last'])[-28:]}")
     print(f"  EXT-X-ENDLIST     {a['endlist']}")
-    print(f"  playlist-type     {a['playlist_type']}")
+    print(f"  playlist type     {a['playlist_type']}")
 
-    print("\n--- conclusie ---")
+    print("\n--- conclusion ---")
     if a["endlist"] or (a["playlist_type"] or "").upper() == "VOD":
         print(
-            "Afgesloten clip. Bird Buddy vraagt de Kinesis-sessie aan als\n"
-            "ON_DEMAND of LIVE_REPLAY, dus je krijgt alleen de fragmenten die\n"
-            "op dat moment klaarstonden. ffmpeg speelt die af en stopt.\n"
-            "Oplossing: tijdens de sessie periodiek watchingStartCheck\n"
-            "aanroepen en de verse streamUrl gebruiken."
+            "Closed clip. Bird Buddy requested the Kinesis session as ON_DEMAND\n"
+            "or LIVE_REPLAY, so you only get the fragments that were ready at\n"
+            "that moment. ffmpeg plays them and stops.\n"
+            "Fix: call watchingStartCheck periodically during the session and\n"
+            "use the fresh streamUrl."
         )
     elif b["last"] != a["last"] or b["sequence"] != a["sequence"]:
         print(
-            "Echte live-playlist; er komen nieuwe segmenten bij. Het probleem\n"
-            "zit dan aan de afspeelkant. go2rtc ertussen zetten helpt, want die\n"
-            "herstelt na een onderbreking waar de HA-streamcomponent opgeeft."
+            "Genuine live playlist; new segments keep arriving. The problem is\n"
+            "on the playback side. Putting go2rtc in between helps, because it\n"
+            "recovers from interruptions where the Home Assistant stream\n"
+            "component gives up."
         )
     else:
         print(
-            "Playlist staat stil zonder ENDLIST: de feeder stopt met zenden.\n"
-            "Dat is een netwerk- of accukwestie, geen softwareprobleem."
+            "Playlist is frozen without ENDLIST: the feeder stopped sending.\n"
+            "That is a network or battery matter, not a software problem."
         )
 
 
+async def _keepalive(client: BirdBuddy) -> None:
+    """Keep the session alive for the duration of the measurement."""
+    while True:
+        await asyncio.sleep(25)
+        try:
+            await client._make_request(  # noqa: SLF001
+                query=Q_KEEP, subscript="watchingActiveKeep"
+            )
+        except Exception:  # noqa: BLE001
+            return
+
+
 async def main() -> int:
+    """Run the probe."""
     email = os.environ.get("BB_EMAIL")
     password = os.environ.get("BB_PASSWORD")
 
     if not email or not password:
-        log("Zet BB_EMAIL en BB_PASSWORD in je omgeving.")
+        log("Set BB_EMAIL and BB_PASSWORD in your environment.")
         return 2
 
     client = BirdBuddy(email, password)
     if not await client.refresh():
-        log("Inloggen mislukt.")
+        log("Sign-in failed.")
         return 1
 
     feeders = list(client.feeders.values())
     if not feeders:
-        log("Geen feeders op dit account.")
+        log("No feeders on this account.")
         return 1
 
     wanted = os.environ.get("BB_FEEDER_ID")
@@ -270,10 +291,10 @@ async def main() -> int:
 
     started = False
     try:
-        log("Stream starten, dit kan even duren...")
+        log("Starting the stream, this can take a while...")
         url = await start_stream(client, feeder.id)
         started = True
-        log("Stream actief.\n")
+        log("Stream active.\n")
 
         async with aiohttp.ClientSession() as session:
             keeper = asyncio.create_task(_keepalive(client))
@@ -283,7 +304,7 @@ async def main() -> int:
                 keeper.cancel()
 
     except (RuntimeError, TimeoutError) as err:
-        log(f"Fout: {err}")
+        log(f"Error: {err}")
         return 1
     finally:
         try:
@@ -294,22 +315,11 @@ async def main() -> int:
             await client._make_request(  # noqa: SLF001
                 query=Q_COOLDOWN, subscript="watchingCooldown"
             )
-            log("\nSessie netjes afgesloten.")
+            log("\nSession closed cleanly.")
         except Exception as err:  # noqa: BLE001
-            log(f"Afsluiten faalde: {err}")
+            log(f"Closing the session failed: {err}")
 
     return 0
-
-
-async def _keepalive(client: BirdBuddy) -> None:
-    while True:
-        await asyncio.sleep(25)
-        try:
-            await client._make_request(  # noqa: SLF001
-                query=Q_KEEP, subscript="watchingActiveKeep"
-            )
-        except Exception:  # noqa: BLE001
-            return
 
 
 if __name__ == "__main__":
