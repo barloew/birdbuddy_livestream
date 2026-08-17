@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from birdbuddy.client import BirdBuddy
+from birdbuddy.exceptions import AuthenticationFailedError
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant
@@ -28,6 +29,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             raise ConfigEntryAuthFailed("Could not sign in to Bird Buddy")
     except ConfigEntryAuthFailed:
         raise
+    except (AuthenticationFailedError, KeyError) as err:
+        # A rejected sign-in surfaces as a KeyError, because pybirdbuddy reads
+        # the token from a response that is a Problem rather than an Auth.
+        raise ConfigEntryAuthFailed(
+            f"Bird Buddy rejected the sign-in: {err}"
+        ) from err
     except Exception as err:  # noqa: BLE001
         raise ConfigEntryNotReady(f"Bird Buddy is unreachable: {err}") from err
 

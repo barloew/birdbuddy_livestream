@@ -7,6 +7,7 @@ from typing import Any
 
 import voluptuous as vol
 from birdbuddy.client import BirdBuddy
+from birdbuddy.exceptions import AuthenticationFailedError
 from homeassistant.config_entries import (
     ConfigEntry,
     ConfigFlow,
@@ -72,8 +73,21 @@ class BirdBuddyStreamConfigFlow(ConfigFlow, domain=DOMAIN):
             client = BirdBuddy(email, user_input[CONF_PASSWORD])
             try:
                 ok = await client.refresh()
+            except (AuthenticationFailedError, KeyError) as err:
+                # authEmailSignIn returns a union: an Auth object on success, a
+                # Problem on rejection. pybirdbuddy reaches straight for the
+                # token, so a rejected sign-in surfaces as a KeyError.
+                LOGGER.error(
+                    "Bird Buddy rejected the sign-in for %s: %s. "
+                    "Note that accounts created through Google or Facebook "
+                    "cannot be used. Enable debug logging on the 'birdbuddy' "
+                    "logger to see the reason returned by the server.",
+                    email,
+                    err,
+                )
+                errors["base"] = "invalid_auth"
             except Exception:  # noqa: BLE001
-                LOGGER.exception("Could not connect to Bird Buddy")
+                LOGGER.exception("Could not reach Bird Buddy")
                 errors["base"] = "cannot_connect"
             else:
                 if not ok:

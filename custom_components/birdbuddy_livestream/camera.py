@@ -474,6 +474,11 @@ class BirdBuddyCamera(Camera):
         # of demux timeouts.
         await self._async_stop_ha_stream()
 
+        # Replace the expired Kinesis URL with a placeholder, so anything that
+        # still polls the stream does not make go2rtc retry a dead source.
+        if self._go2rtc is not None:
+            await self._go2rtc.async_park(self._go2rtc_name)
+
         try:
             await self._watcher.async_stop()
         except Exception:  # noqa: BLE001

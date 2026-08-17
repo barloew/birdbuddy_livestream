@@ -133,13 +133,34 @@ class Go2RtcClient:
 
         return int(producers[0].get("bytes_recv") or 0)
 
+    async def async_park(self, name: str) -> None:
+        """Point the stream at a placeholder after a session ends.
+
+        The registration is kept so the Home Assistant stream worker does not
+        hit a 404 while reconnecting. Leaving the expired Kinesis URL in place
+        is not an option either: anything that polls the stream makes go2rtc
+        launch ffmpeg against a dead URL, filling its log with 403s. A null
+        source accepts the connection and produces nothing.
+        """
+        url = (
+            f"{self._base_url}/api/streams"
+            f"?name={quote(name, safe='')}&src={quote('null:', safe='')}"
+        )
+        try:
+            async with self._session.put(url) as resp:
+                if resp.status >= 400:
+                    LOGGER.debug("Parking stream %s returned %s", name, resp.status)
+                else:
+                    LOGGER.debug("Parked stream %s", name)
+        except aiohttp.ClientError as err:
+            LOGGER.debug("Parking stream %s failed: %s", name, err)
+
     async def async_delete(self, name: str) -> None:
         """Remove the stream.
 
-        Deliberately not called when a session stops: go2rtc only starts the
-        source once a consumer connects, so a registered stream without viewers
-        costs nothing. Leaving it in place keeps the Home Assistant stream
-        worker from hitting a 404 while it reconnects.
+        Not used when a session stops; see async_park for that. Deleting the
+        stream would give the Home Assistant stream worker a 404 while it is
+        reconnecting.
         """
         url = f"{self._base_url}/api/streams?src={quote(name, safe='')}"
         try:

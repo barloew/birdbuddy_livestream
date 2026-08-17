@@ -14,6 +14,7 @@ installation and normal use, see the [README](../README.md).
 - [Diagnostics](#diagnostics)
 - [Error reference](#error-reference)
 - [Standalone probe](#standalone-probe)
+- [Brand assets](#brand-assets)
 - [Translations](#translations)
 - [Contributing](#contributing)
 
@@ -150,10 +151,13 @@ Two things worth knowing:
 after go2rtc restarts. That is expected. The integration checks on each stream
 request and re-registers when needed.
 
-**The stream is not deleted when a session ends.** go2rtc only starts the source
-once a consumer connects, so a registered stream without viewers costs nothing.
-Deleting it would give the Home Assistant stream worker a 404 while it is
-reconnecting.
+**The stream is not deleted when a session ends, but its source is replaced.**
+Deleting the registration would give the Home Assistant stream worker a 404
+while it is reconnecting. Leaving the expired Kinesis URL in place is worse:
+anything that still polls the stream makes go2rtc launch ffmpeg against a dead
+URL, filling its log with `403 Forbidden` every twenty minutes. The integration
+therefore parks the stream on a `null:` source, which accepts connections and
+produces nothing.
 
 ### Why transcoding
 
@@ -256,6 +260,7 @@ curl -s "http://192.168.1.10:1984/api/streams?src=birdbuddy_9f5cc1c488ec" \
 | `Camera is off` | HA | Outdated version where `is_on` tracked the session. |
 | `404 Not Found, rtsp://...` | HA | go2rtc does not know the stream; it re-registers on the next session. |
 | `Error demuxing stream (Operation timed out)` | HA | The source stalled; check `bytes_recv`. |
+| `403 Forbidden` on a Kinesis URL | go2rtc | An expired session URL is still registered. Fixed in 1.0.1; restart go2rtc to clear a stale entry. |
 | `source with spaces may be insecure` | go2rtc | Something put a space in the source string. Clear the ffmpeg template. |
 | `Unable to choose an output format` | go2rtc | The ffmpeg template name is undefined in `go2rtc.yaml`. |
 | `Cannot query field ... on type "AnyFeeder"` | integration | GraphQL fragments broken; report a bug. |
@@ -283,6 +288,31 @@ compete for the same session.
 The output shows the master playlist including its codec line, both playlist
 samples with segment URLs redacted, and a verdict on whether segments keep
 arriving.
+
+---
+
+## Brand assets
+
+HACS requires brand artwork. It looks in
+`custom_components/birdbuddy_livestream/brand/` first and falls back to the
+[Home Assistant brands repository][brands].
+
+| File | Size |
+|---|---|
+| `icon.png` | 256×256 |
+| `icon@2x.png` | 512×512 |
+| `logo.png` | 256×256 |
+| `logo@2x.png` | 512×512 |
+
+All four are square PNGs with transparency.
+
+Getting the integration into the default HACS store additionally requires a
+pull request to the [brands repository][brands] adding the same files under
+`custom_integrations/birdbuddy_livestream/`.
+
+The artwork is based on Bird Buddy's own mark. Bird Buddy holds the trademark;
+it is used here to identify which device the integration talks to and does not
+imply any endorsement.
 
 ---
 
@@ -320,4 +350,5 @@ version, whether go2rtc is in use, and a debug log covering one full start
 attempt. Strip `Authorization` headers, refresh tokens and `SessionToken` values
 before posting.
 
+[brands]: https://github.com/home-assistant/brands
 [pybirdbuddy]: https://github.com/jhansche/pybirdbuddy
