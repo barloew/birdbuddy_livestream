@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.1
+
+- The status now says *why* no stream is possible, instead of only "idle" or
+  "error". The feeder's own state is read every five minutes and before every
+  start attempt, so a sleeping feeder is reported as asleep rather than as a
+  ninety-second timeout
+- The preview image is captioned with the reason: "Feeder is asleep", "Feeder
+  is offline", "Updating firmware" and so on
+- Both now work whether or not continuous mode is enabled; previously the
+  feeder state was only read by the continuous-mode supervisor
+
 ## 1.2.0
 
 A large release. The livestream now opens on the first click, the camera card

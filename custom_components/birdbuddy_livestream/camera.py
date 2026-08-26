@@ -50,6 +50,7 @@ from .const import (
     PREVIEW_LAST_FRAME,
     SIGNAL_STATUS,
     STALE_CHECKS_BEFORE_REPUBLISH,
+    STATE_POLL_INTERVAL,
     STATUS_ERROR,
     STATUS_IDLE,
     STATUS_SLEEPING,
@@ -139,6 +140,7 @@ class BirdBuddyCamera(Camera):
         self._seen_viewer = False
         self._idle_count = 0
         self._cancel_supervisor: Any = None
+        self._cancel_state_poll: Any = None
         self._retry_after = 0.0
         # Home Assistant calls stream_source() while the entity is being added,
         # to work out which WebRTC provider fits. Without this flag every
@@ -147,6 +149,7 @@ class BirdBuddyCamera(Camera):
         self._enabled = True
         self._preview = PreviewProvider(hass, dict(entry.options))
         self._status = STATUS_IDLE
+        self._status_detail: str | None = None
         self._cancel_frame_grab: Any = None
 
         self._attr_unique_id = f"{feeder.id}_livestream"
@@ -266,9 +269,10 @@ class BirdBuddyCamera(Camera):
     @callback
     def _set_status(self, status: str, detail: str | None = None) -> None:
         """Publish a status change to the sensor and refresh the preview."""
-        if status == self._status and detail is None:
+        if status == self._status and detail == self._status_detail:
             return
         self._status = status
+        self._status_detail = detail
         async_dispatcher_send(
             self.hass, SIGNAL_STATUS.format(self._feeder_id), status, detail
         )
@@ -361,7 +365,7 @@ class BirdBuddyCamera(Camera):
         disproportionate amount of battery. Instead the card shows whichever
         image the user configured, captioned with the current status.
         """
-        return await self._preview.async_image(self._status)
+        return await self._preview.async_image(self._status, self._status_detail)
 
     async def async_turn_on(self) -> None:
         """Turn the camera on and start the session in the background."""
@@ -370,6 +374,12 @@ class BirdBuddyCamera(Camera):
         self._may_wake_feeder = True
         self._retry_after = 0.0
         self._async_ensure_start_task()
+        self._async_start_state_poll()
+        self.hass.async_create_task(
+            self._async_poll_state(None),
+            name=f"{DOMAIN} state {self._feeder_id}",
+        )
+
         if self._continuous:
             self._async_start_supervisor()
         self._async_refresh_preview()
@@ -407,6 +417,7 @@ class BirdBuddyCamera(Camera):
         """Do not leave the feeder streaming when the entity disappears."""
         self._may_wake_feeder = False
         self._async_stop_supervisor()
+        self._async_stop_state_poll()
         self._watcher.unregister_listeners(self._feeder_id)
         if self._session_active:
             await self._async_teardown()
@@ -431,6 +442,21 @@ class BirdBuddyCamera(Camera):
             self._feeder_id,
             self._start_timeout,
         )
+        # Check first, so a sleeping feeder is reported as such instead of as a
+        # ninety-second timeout.
+        state = await self._watcher.async_feeder_state(self._feeder_id)
+        if not self._watcher.is_streamable(state):
+            LOGGER.info(
+                "Feeder %s reports %s, no livestream possible",
+                self._feeder_id,
+                state,
+            )
+            self._stream_url = None
+            self._last_error = f"The feeder is not available ({state})"
+            self._set_status(STATUS_SLEEPING, state)
+            self._async_refresh_preview()
+            return
+
         self._set_status(STATUS_WAKING)
         try:
             self._stream_url = await self._watcher.async_start(
@@ -691,6 +717,51 @@ class BirdBuddyCamera(Camera):
         # Without reviving it here the picture never comes back after a stall.
         self._async_restart_ha_stream()
 
+    # -- feeder state ------------------------------------------------------
+
+    @callback
+    def _async_start_state_poll(self) -> None:
+        """Keep the reported status honest while no session is running.
+
+        Without this the card and the sensor only ever say "idle", and a start
+        attempt against a sleeping feeder surfaces as a timeout rather than as
+        "the feeder is asleep".
+        """
+        if self._cancel_state_poll is not None:
+            return
+
+        self._cancel_state_poll = async_track_time_interval(
+            self.hass,
+            self._async_poll_state,
+            timedelta(seconds=STATE_POLL_INTERVAL),
+        )
+
+    @callback
+    def _async_stop_state_poll(self) -> None:
+        if self._cancel_state_poll is not None:
+            self._cancel_state_poll()
+            self._cancel_state_poll = None
+
+    async def _async_poll_state(self, _now: Any) -> None:
+        """Read the feeder state and reflect it in the status."""
+        if self._session_active:
+            return
+        if self._start_task is not None and not self._start_task.done():
+            return
+        # An error worth reading should not be overwritten by a routine poll.
+        if self._status == STATUS_ERROR:
+            return
+
+        state = await self._watcher.async_feeder_state(self._feeder_id)
+        if state is None:
+            return
+
+        if self._watcher.is_streamable(state):
+            self._set_status(STATUS_IDLE)
+        else:
+            LOGGER.debug("Feeder %s reports %s", self._feeder_id, state)
+            self._set_status(STATUS_SLEEPING, state)
+
     # -- continuous mode ---------------------------------------------------
 
     @callback
@@ -857,8 +928,6 @@ class BirdBuddyCamera(Camera):
         self._stale_count = 0
         self._seen_viewer = False
         self._idle_count = 0
-        self._cancel_supervisor: Any = None
-        self._retry_after = 0.0
 
         # Release the feeder first: that is the step that matters for battery.
         await self._async_step(

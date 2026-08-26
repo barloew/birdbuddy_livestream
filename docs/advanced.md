@@ -234,6 +234,13 @@ and restarts the session whenever it is not running. The auto-off timer and the
 unwatched-stop are both skipped, since neither makes sense when the point is to
 stay up.
 
+The feeder state is also read outside continuous mode: every
+`STATE_POLL_INTERVAL` seconds while no session runs, and once before every start
+attempt. Without that the status would only ever read `idle`, and starting
+against a sleeping feeder would surface as a ninety-second timeout rather than
+as "the feeder is asleep". The reason is passed to the preview, which captions
+the image accordingly through `FEEDER_STATE_TEXT`.
+
 Before each attempt the supervisor reads the feeder's own state through
 `client.refresh()` and checks it against `STREAMABLE_FEEDER_STATES`
 (`READY_TO_STREAM`, `STREAMING`, `ONLINE`, `TAKING_POSTCARDS`). Anything else —
@@ -299,6 +306,7 @@ Fixed timings, in `const.py`:
 | `STALE_CHECKS_BEFORE_REPUBLISH` | 2 | stalled checks before a fresh URL |
 | `IDLE_CHECKS_BEFORE_STOP` | 4 | checks without viewers before stopping |
 | `SUPERVISE_INTERVAL` | 30 s | how often continuous mode checks the session |
+| `STATE_POLL_INTERVAL` | 300 s | how often the feeder state is read while idle |
 | `LAST_FRAME_INTERVAL` | 60 s | how often to grab a still while streaming |
 | `SIGNED_URL_TTL` | 60 s | validity of a signed URL for another entity's picture |
 

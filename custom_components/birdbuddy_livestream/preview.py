@@ -30,6 +30,7 @@ from .const import (
     PREVIEW_NONE,
     SIGNED_URL_TTL,
     STATUS_ERROR,
+    STATUS_SLEEPING,
     STATUS_STREAMING,
     STATUS_WAKING,
     STATUS_WARMING_UP,
@@ -43,7 +44,22 @@ OVERLAY_TEXT: dict[str, str] = {
     STATUS_WAKING: "Waking up the feeder...",
     STATUS_WARMING_UP: "Almost there...",
     STATUS_STREAMING: "Live",
+    STATUS_SLEEPING: "Feeder unavailable",
     STATUS_ERROR: "Livestream unavailable",
+}
+
+# When the feeder itself is the reason no stream is possible, say which reason.
+# "Asleep" reads very differently from "offline" to someone glancing at a
+# dashboard, and only one of the two is worth acting on.
+FEEDER_STATE_TEXT: dict[str, str] = {
+    "DEEP_SLEEP": "Feeder is asleep",
+    "OFFLINE": "Feeder is offline",
+    "OFF_GRID": "Feeder is off-grid",
+    "OUT_OF_FEEDER": "Feeder module removed",
+    "FIRMWARE_UPDATE": "Updating firmware",
+    "PENDING_FACTORY_RESET": "Factory reset pending",
+    "PENDING_REMOVAL": "Removal pending",
+    "FACTORY_RESET": "Factory reset in progress",
 }
 
 
@@ -83,7 +99,16 @@ class PreviewProvider:
     def _overlay_enabled(self) -> bool:
         return bool(self._options.get(CONF_STATUS_OVERLAY, DEFAULT_STATUS_OVERLAY))
 
-    async def async_image(self, status: str) -> bytes | None:
+    @staticmethod
+    def caption(status: str, detail: str | None = None) -> str | None:
+        """Return the line to write across the preview, if any."""
+        if detail and (text := FEEDER_STATE_TEXT.get(detail)):
+            return text
+        return OVERLAY_TEXT.get(status)
+
+    async def async_image(
+        self, status: str, detail: str | None = None
+    ) -> bytes | None:
         """Return the preview image for the given status.
 
         Returns None when no preview is configured or the source could not be
@@ -92,8 +117,10 @@ class PreviewProvider:
         if self._source == PREVIEW_NONE:
             return None
 
-        # Only the overlay text varies per status, so cache on that.
-        key = (self._source, status if self._overlay_enabled else None)
+        text = self.caption(status, detail) if self._overlay_enabled else None
+
+        # Only the caption varies between calls, so cache on that.
+        key = (self._source, text)
         if self._cache is not None and self._cache_key == key:
             return self._cache
 
@@ -102,7 +129,7 @@ class PreviewProvider:
             return None
 
         image = base
-        if self._overlay_enabled and (text := OVERLAY_TEXT.get(status)):
+        if text:
             image = await self._hass.async_add_executor_job(
                 _draw_overlay, base, text
             )

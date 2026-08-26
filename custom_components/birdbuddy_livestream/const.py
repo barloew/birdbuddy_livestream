@@ -238,3 +238,7 @@ SUPERVISE_INTERVAL: Final = 30
 STREAMABLE_FEEDER_STATES: Final = frozenset(
     {"READY_TO_STREAM", "STREAMING", "ONLINE", "TAKING_POSTCARDS"}
 )
+
+# How often to read the feeder's own state while no session is running, so the
+# card and the sensor can say "asleep" rather than just "idle".
+STATE_POLL_INTERVAL: Final = 300

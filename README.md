@@ -121,6 +121,13 @@ default. There is an experimental setting to end it as soon as you close the
 card, but it is off by default because it can also trigger during a brief
 interruption and cut off someone who is still watching.
 
+**The card tells you when the feeder is unavailable.** Bird Buddy powers its
+camera down after dark, and can also go offline, switch to off-grid mode or
+install firmware. In all of those cases the status sensor reads **Asleep** with
+the reason in its `detail` attribute, and the preview says so in plain words —
+"Feeder is asleep", "Feeder is offline", "Updating firmware". No stream can be
+started until the feeder is back.
+
 **Only one person can watch at a time.** Bird Buddy allows a single live session
 per account. If the app is streaming on your phone, Home Assistant cannot start
 one, and the other way around. Close the app if the stream will not start.
