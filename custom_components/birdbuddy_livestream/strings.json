@@ -30,14 +30,32 @@
           "go2rtc_url": "go2rtc address (optional)",
           "go2rtc_rtsp_port": "go2rtc RTSP port",
           "go2rtc_input": "go2rtc ffmpeg template (optional)",
-          "transcode": "Transcode to H.264"
+          "transcode": "Transcode to H.264",
+          "preview_source": "Preview image",
+          "preview_entity": "Preview entity",
+          "preview_file": "Preview image file",
+          "status_overlay": "Show status on the preview",
+          "instant_start": "Open the stream on the first click",
+          "placeholder_source": "Placeholder source",
+          "stop_when_unwatched": "Stop when nobody is watching",
+          "continuous": "Stream continuously",
+          "retry_interval": "Retry every"
         },
         "data_description": {
           "auto_off": "Streaming drains the battery quickly.",
           "start_timeout": "A sleeping feeder on a weak signal may need well over a minute.",
           "go2rtc_url": "Leave empty to let Home Assistant read the HLS stream directly.",
           "go2rtc_input": "Name of an ffmpeg template defined in go2rtc.yaml. Leave empty unless you know you need it.",
-          "transcode": "The feeder sends HEVC, which only plays in Safari without transcoding."
+          "transcode": "The feeder sends HEVC, which only plays in Safari without transcoding.",
+          "preview_source": "What the camera card shows while nobody is watching.",
+          "preview_entity": "Used with 'Latest postcard'. Pick an entity that has a picture, such as the recent visitor sensor from ha-birdbuddy.",
+          "preview_file": "Used with 'Image file'. Full path to a JPEG or PNG in an allowed directory, for example /media/local/birdbuddy.jpg",
+          "status_overlay": "Writes 'Waking up', 'Live' and similar across the bottom of the preview.",
+          "instant_start": "Requires go2rtc. Shows a holding pattern while the feeder wakes, then swaps in the live picture automatically.",
+          "placeholder_source": "go2rtc source shown while waking. Leave empty for the default test pattern. No spaces allowed.",
+          "stop_when_unwatched": "Requires go2rtc. Experimental: an empty viewer list can also mean the stream briefly dropped, which cuts off someone who is still watching. The stop timer already protects the battery.",
+          "continuous": "For feeders on permanent power. Keeps the stream up for something like Frigate. Bird Buddy records no postcards while streaming, and the feeder still sleeps at night.",
+          "retry_interval": "How long to wait before trying again after a failed start, or while the feeder is asleep."
         }
       }
     }
@@ -46,10 +64,44 @@
     "camera": {
       "livestream": {
         "state_attributes": {
-          "session_active": { "name": "Session active" },
-          "starting": { "name": "Starting" },
-          "last_error": { "name": "Last error" }
+          "session_active": {
+            "name": "Session active"
+          },
+          "starting": {
+            "name": "Starting"
+          },
+          "last_error": {
+            "name": "Last error"
+          }
         }
+      }
+    },
+    "sensor": {
+      "livestream_status": {
+        "name": "Livestream status",
+        "state": {
+          "idle": "Idle",
+          "waking": "Waking up",
+          "warming_up": "Warming up",
+          "streaming": "Streaming",
+          "error": "Error",
+          "sleeping": "Asleep"
+        }
+      }
+    },
+    "button": {
+      "prepare_livestream": {
+        "name": "Prepare livestream"
+      }
+    }
+  },
+  "selector": {
+    "preview_source": {
+      "options": {
+        "none": "None",
+        "last_frame": "Last frame of the previous stream",
+        "entity": "Latest postcard or other entity picture",
+        "file": "Image file"
       }
     }
   }

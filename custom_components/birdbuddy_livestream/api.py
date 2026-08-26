@@ -13,6 +13,7 @@ from birdbuddy.client import BirdBuddy
 
 from .const import (
     DEFAULT_START_TIMEOUT,
+    STREAMABLE_FEEDER_STATES,
     KEEPALIVE_INTERVAL,
     POLL_INTERVAL,
     WARMUP_MIN_SEGMENTS,
@@ -118,9 +119,24 @@ class BirdBuddyWatcher:
             deadline = loop.time() + timeout
 
             while True:
-                typename = result.get("__typename")
-                watching = result.get("watching") or {}
-                LOGGER.debug("watching %s / state=%s", typename, watching.get("state"))
+                typename = (result or {}).get("__typename")
+                watching = (result or {}).get("watching") or {}
+
+                if typename is None:
+                    # Bird Buddy occasionally answers without a recognisable
+                    # result type. Polling again clears it, so this is noted
+                    # rather than treated as a failure.
+                    LOGGER.debug("Unrecognised watching response: %s", result)
+                else:
+                    LOGGER.debug(
+                        "watching %s / state=%s", typename, watching.get("state")
+                    )
+
+                if typename is None:
+                    # Bird Buddy occasionally answers without a recognisable
+                    # result type. Treat it as "not ready yet" and poll on
+                    # rather than failing the start.
+                    LOGGER.debug("Unrecognised watching result, polling on")
 
                 if typename == "WatchingActiveResult" and watching.get("streamUrl"):
                     self._active = ActiveStream(
@@ -300,10 +316,47 @@ class BirdBuddyWatcher:
         if (callback := self._lost_listeners.get(feeder_id)) is not None:
             callback()
 
+    # -- feeder state ------------------------------------------------------
+
+    async def async_feeder_state(self, feeder_id: str) -> str | None:
+        """Return the feeder's current state, refreshing it from the cloud.
+
+        Used to tell "asleep" apart from "broken": the feeder puts itself into
+        DEEP_SLEEP at night, and no livestream can be started until it wakes.
+        """
+        try:
+            await self._client.refresh()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.debug("Could not refresh the feeder state: %s", err)
+            return None
+
+        feeder = self._client.feeders.get(feeder_id)
+        if feeder is None:
+            return None
+
+        state = feeder.get("state")
+        return str(state) if state is not None else None
+
+    @staticmethod
+    def is_streamable(state: str | None) -> bool:
+        """Whether a livestream can be started in this feeder state.
+
+        An unknown state counts as streamable: better to try and fail than to
+        refuse because Bird Buddy introduced a state we have not seen.
+        """
+        if state is None:
+            return True
+        return state in STREAMABLE_FEEDER_STATES
+
     # -- stopping ----------------------------------------------------------
 
     async def async_stop(self) -> list[str]:
         """End the session. Returns photos taken during the stream."""
+        # Cancel the keepalive before touching the lock. If anything below
+        # stalls, the feeder still stops being kept awake, which is the part
+        # that costs battery.
+        self._cancel_keepalive()
+
         async with self._lock:
             return await self._async_stop_locked()
 

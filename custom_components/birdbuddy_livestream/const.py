@@ -129,3 +129,112 @@ mutation watchingCooldown {
   }
 }
 """
+
+# --- Preview image -----------------------------------------------------------
+
+CONF_PREVIEW_SOURCE: Final = "preview_source"
+CONF_PREVIEW_ENTITY: Final = "preview_entity"
+CONF_PREVIEW_FILE: Final = "preview_file"
+CONF_STATUS_OVERLAY: Final = "status_overlay"
+
+PREVIEW_NONE: Final = "none"
+PREVIEW_LAST_FRAME: Final = "last_frame"
+PREVIEW_ENTITY: Final = "entity"
+PREVIEW_FILE: Final = "file"
+
+PREVIEW_SOURCES: Final = [
+    PREVIEW_NONE,
+    PREVIEW_LAST_FRAME,
+    PREVIEW_ENTITY,
+    PREVIEW_FILE,
+]
+
+DEFAULT_PREVIEW_SOURCE: Final = PREVIEW_LAST_FRAME
+DEFAULT_STATUS_OVERLAY: Final = True
+
+# How often to grab a still from a running stream to keep the last frame fresh.
+LAST_FRAME_INTERVAL: Final = 60
+# How long a signed URL for another entity's picture stays valid.
+SIGNED_URL_TTL: Final = 60
+
+# --- Status ------------------------------------------------------------------
+
+STATUS_IDLE: Final = "idle"
+STATUS_WAKING: Final = "waking"
+STATUS_WARMING_UP: Final = "warming_up"
+STATUS_STREAMING: Final = "streaming"
+STATUS_ERROR: Final = "error"
+STATUS_SLEEPING: Final = "sleeping"
+
+STATUSES: Final = [
+    STATUS_IDLE,
+    STATUS_WAKING,
+    STATUS_WARMING_UP,
+    STATUS_STREAMING,
+    STATUS_SLEEPING,
+    STATUS_ERROR,
+]
+
+# Dispatcher signal carrying status changes, formatted with the feeder id.
+SIGNAL_STATUS: Final = DOMAIN + "_status_{}"
+
+# --- Instant start -----------------------------------------------------------
+
+CONF_INSTANT_START: Final = "instant_start"
+CONF_PLACEHOLDER_SOURCE: Final = "placeholder_source"
+
+DEFAULT_INSTANT_START: Final = True
+# A go2rtc source that produces frames immediately, so Home Assistant's stream
+# worker has something to connect to while the feeder wakes up.
+#
+# The trailing #video=h264 is not optional: without an encode step go2rtc
+# accepts the source but yields no frames at all. The size matches the feeder's
+# portrait aspect ratio, so the picture does not jump when the live stream takes
+# over. Must not contain spaces; go2rtc rejects those.
+# The size matches the feeder's native output (1536x2048 portrait). A
+# resolution change halfway through an HLS stream is exactly what makes players
+# stall on the swap, so placeholder and live picture must agree.
+DEFAULT_PLACEHOLDER_SOURCE: Final = (
+    "ffmpeg:virtual?video=testsrc&size=1536x2048#video=h264"
+)
+
+# Each teardown step gets its own budget, so one stalled call cannot leave the
+# feeder streaming.
+TEARDOWN_STEP_TIMEOUT: Final = 15
+# Budget for probing whether the placeholder actually produces video.
+PLACEHOLDER_PROBE_TIMEOUT: Final = 8
+
+# Stop the session once go2rtc reports no viewers, rather than waiting out the
+# auto-off timer.
+#
+# Off by default, and deliberately so: an empty consumer list means "nobody is
+# connected", which is also true for the moment when Home Assistant's stream
+# worker has died and not yet come back. Acting on it then cuts off a viewer
+# who is still watching. The auto-off timer remains the reliable protection.
+CONF_STOP_WHEN_UNWATCHED: Final = "stop_when_unwatched"
+DEFAULT_STOP_WHEN_UNWATCHED: Final = False
+# Consecutive checks without viewers before stopping, at one check per
+# keepalive. Four gives a restarting worker time to reappear.
+IDLE_CHECKS_BEFORE_STOP: Final = 4
+
+# --- Continuous streaming ----------------------------------------------------
+
+# For feeders on permanent power (USB-C or a well-fed solar panel), where the
+# stream can simply stay up for something like Frigate to consume. The trade-off
+# is Bird Buddy's own postcards, which the feeder does not record while
+# streaming.
+CONF_CONTINUOUS: Final = "continuous"
+CONF_RETRY_INTERVAL: Final = "retry_interval"
+
+DEFAULT_CONTINUOUS: Final = False
+# How often to try again after a failed start, or while the feeder sleeps.
+DEFAULT_RETRY_INTERVAL: Final = 120
+# How often the supervisor checks that the session is still up.
+SUPERVISE_INTERVAL: Final = 30
+
+# Feeder states from which a livestream can be started. Everything else means
+# the feeder is asleep, offline, updating or otherwise unavailable; the feeder
+# goes into DEEP_SLEEP by itself at night.
+STREAMABLE_FEEDER_STATES: Final = frozenset(
+    {"READY_TO_STREAM", "STREAMING", "ONLINE", "TAKING_POSTCARDS"}
+)

@@ -30,14 +30,32 @@
           "go2rtc_url": "go2rtc-adres (optioneel)",
           "go2rtc_rtsp_port": "go2rtc RTSP-poort",
           "go2rtc_input": "go2rtc ffmpeg-sjabloon (optioneel)",
-          "transcode": "Omzetten naar H.264"
+          "transcode": "Omzetten naar H.264",
+          "preview_source": "Previewafbeelding",
+          "preview_entity": "Preview-entiteit",
+          "preview_file": "Bestand voor de preview",
+          "status_overlay": "Status op de preview tonen",
+          "instant_start": "Stream openen bij de eerste klik",
+          "placeholder_source": "Placeholder-bron",
+          "stop_when_unwatched": "Stoppen als niemand kijkt",
+          "continuous": "Continu streamen",
+          "retry_interval": "Opnieuw proberen elke"
         },
         "data_description": {
           "auto_off": "Streamen trekt de accu snel leeg.",
           "start_timeout": "Een slapende feeder met een zwak signaal heeft soms ruim een minuut nodig.",
           "go2rtc_url": "Leeg laten om de HLS-stream rechtstreeks door Home Assistant te laten lezen.",
           "go2rtc_input": "Naam van een ffmpeg-sjabloon uit go2rtc.yaml. Leeg laten tenzij je zeker weet dat je het nodig hebt.",
-          "transcode": "De feeder zendt HEVC, wat zonder omzetting alleen in Safari speelt."
+          "transcode": "De feeder zendt HEVC, wat zonder omzetting alleen in Safari speelt.",
+          "preview_source": "Wat de camerakaart toont wanneer niemand kijkt.",
+          "preview_entity": "Voor 'Laatste postcard'. Kies een entiteit met een afbeelding, bijvoorbeeld de recent-visitor sensor van ha-birdbuddy.",
+          "preview_file": "Voor 'Afbeeldingsbestand'. Volledig pad naar een JPEG of PNG in een toegestane map, bijvoorbeeld /media/local/birdbuddy.jpg",
+          "status_overlay": "Zet 'Wordt gewekt', 'Live' en dergelijke onderaan de preview.",
+          "instant_start": "Vereist go2rtc. Toont een wachtbeeld terwijl de feeder wakker wordt en schakelt daarna automatisch over naar live.",
+          "placeholder_source": "go2rtc-bron voor het wachtbeeld. Leeg laten voor het standaard testpatroon. Spaties zijn niet toegestaan.",
+          "stop_when_unwatched": "Vereist go2rtc. Experimenteel: een lege kijkerslijst kan ook betekenen dat de stream kort wegviel, waardoor iemand die nog kijkt wordt afgebroken. De stoptimer beschermt de accu al.",
+          "continuous": "Voor feeders met permanente voeding. Houdt de stream in de lucht voor bijvoorbeeld Frigate. Bird Buddy maakt tijdens het streamen geen postcards, en 's nachts slaapt de feeder alsnog.",
+          "retry_interval": "Hoe lang wachten voor een nieuwe poging na een mislukte start, of terwijl de feeder slaapt."
         }
       }
     }
@@ -46,10 +64,44 @@
     "camera": {
       "livestream": {
         "state_attributes": {
-          "session_active": { "name": "Sessie actief" },
-          "starting": { "name": "Bezig met starten" },
-          "last_error": { "name": "Laatste fout" }
+          "session_active": {
+            "name": "Sessie actief"
+          },
+          "starting": {
+            "name": "Bezig met starten"
+          },
+          "last_error": {
+            "name": "Laatste fout"
+          }
         }
+      }
+    },
+    "sensor": {
+      "livestream_status": {
+        "name": "Livestreamstatus",
+        "state": {
+          "idle": "Inactief",
+          "waking": "Wordt gewekt",
+          "warming_up": "Warmloopfase",
+          "streaming": "Streamt",
+          "error": "Fout",
+          "sleeping": "Slaapstand"
+        }
+      }
+    },
+    "button": {
+      "prepare_livestream": {
+        "name": "Livestream voorbereiden"
+      }
+    }
+  },
+  "selector": {
+    "preview_source": {
+      "options": {
+        "none": "Geen",
+        "last_frame": "Laatste beeld van de vorige stream",
+        "entity": "Laatste postcard of andere entiteitsafbeelding",
+        "file": "Afbeeldingsbestand"
       }
     }
   }

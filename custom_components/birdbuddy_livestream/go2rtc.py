@@ -77,9 +77,55 @@ class Go2RtcClient:
     ) -> str:
         """Register or replace the stream and return its RTSP address."""
         source = self.build_source(hls_url, transcode, input_template)
-        url = (
-            f"{self._base_url}/api/streams"
-            f"?name={quote(name, safe='')}&src={quote(source, safe='')}"
+        await self.async_publish_raw(name, source)
+
+        if not await self.async_exists(name):
+            raise Go2RtcError(
+                f"go2rtc accepted stream {name} but does not report it back"
+            )
+
+        LOGGER.debug("Published stream %s to go2rtc (transcode=%s)", name, transcode)
+        return self.rtsp_url(name)
+
+    async def async_publish_raw(self, name: str, source: str) -> str:
+        """Give the stream exactly one source, replacing whatever it had."""
+        if " " in source:
+            raise Go2RtcError("source contains spaces, which go2rtc rejects")
+
+        await self._async_set_source(name, source)
+        return self.rtsp_url(name)
+
+    async def _async_set_source(self, name: str, source: str) -> None:
+        """Replace the stream's source, creating the stream when it is new.
+
+        The verb matters. In go2rtc, PUT creates a stream and *appends* another
+        source to one that already exists, while PATCH replaces the source
+        outright. Publishing with PUT throughout leaves the stream holding
+        every source it was ever given: the placeholder, plus each expired
+        Kinesis URL. go2rtc then keeps retrying all of them, which fills its
+        log with 403s, and keeps feeding consumers from the first one that
+        still works, which is why a placeholder went on playing after the live
+        stream had been handed over.
+
+        PATCH also avoids the gap that deleting and recreating leaves behind,
+        during which anything connecting gets a 404.
+        """
+        query = f"?name={quote(name, safe='')}&src={quote(source, safe='')}"
+        url = f"{self._base_url}/api/streams{query}"
+
+        try:
+            async with self._session.patch(url) as resp:
+                if resp.status < 400:
+                    LOGGER.debug("Replaced the source of stream %s", name)
+                    return
+                patch_status = resp.status
+        except aiohttp.ClientError as err:
+            raise Go2RtcError(f"go2rtc is unreachable: {err}") from err
+
+        # PATCH fails when the stream does not exist yet, which is expected on
+        # the first publish after go2rtc started.
+        LOGGER.debug(
+            "PATCH on stream %s returned %s, creating it instead", name, patch_status
         )
 
         try:
@@ -90,13 +136,7 @@ class Go2RtcClient:
         except aiohttp.ClientError as err:
             raise Go2RtcError(f"go2rtc is unreachable: {err}") from err
 
-        if not await self.async_exists(name):
-            raise Go2RtcError(
-                f"go2rtc accepted stream {name} but does not report it back"
-            )
-
-        LOGGER.debug("Published stream %s to go2rtc (transcode=%s)", name, transcode)
-        return self.rtsp_url(name)
+        LOGGER.debug("Created stream %s", name)
 
     async def async_exists(self, name: str) -> bool:
         """Return whether go2rtc knows about the stream.
@@ -111,49 +151,85 @@ class Go2RtcClient:
         except aiohttp.ClientError:
             return False
 
-    async def async_producer_bytes(self, name: str) -> int | None:
-        """Return how many bytes the source has received so far.
+    async def async_can_produce(self, name: str, timeout: float = 8) -> bool:
+        """Check whether the stream actually yields video.
 
-        None means no producer is running. A number that stops growing means
-        the source has stalled.
+        Asks go2rtc for a single frame, which forces it to start the source.
+        Registering a stream through the API always succeeds, even when the
+        source is nonsense, so this is the only way to find out before handing
+        the address to Home Assistant, whose stream worker does not retry.
+        """
+        url = f"{self._base_url}/api/frame.jpeg?src={quote(name, safe='')}"
+        try:
+            async with self._session.get(
+                url, timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as resp:
+                if resp.status >= 400:
+                    LOGGER.debug(
+                        "Frame probe for %s returned %s", name, resp.status
+                    )
+                    return False
+                data = await resp.read()
+        except (aiohttp.ClientError, TimeoutError) as err:
+            LOGGER.debug("Frame probe for %s failed: %s", name, err)
+            return False
+
+        if not data:
+            LOGGER.debug("Frame probe for %s returned an empty body", name)
+            return False
+
+        LOGGER.debug("Frame probe for %s returned %d bytes", name, len(data))
+        return True
+
+    async def async_activity(self, name: str) -> tuple[int | None, int]:
+        """Return how many bytes the source received and how many clients watch.
+
+        A byte count of None means no producer is running. A count that stops
+        growing means the source has stalled. Zero consumers means nobody is
+        watching, so the feeder can go back to sleep.
         """
         url = f"{self._base_url}/api/streams?src={quote(name, safe='')}"
         try:
             async with self._session.get(url) as resp:
                 if resp.status >= 400:
-                    return None
+                    return None, 0
                 data = await resp.json(content_type=None)
         except (aiohttp.ClientError, ValueError) as err:
             LOGGER.debug("Could not read status of stream %s: %s", name, err)
-            return None
+            return None, 0
 
-        producers = (data or {}).get("producers") or []
+        payload = data or {}
+        consumers = len(payload.get("consumers") or [])
+
+        producers = payload.get("producers") or []
+        if len(producers) > 1:
+            LOGGER.warning(
+                "Stream %s has %d sources; go2rtc will feed viewers from the "
+                "first one that works, which may not be the live stream",
+                name,
+                len(producers),
+            )
         if not producers:
-            return None
+            return None, consumers
 
-        return int(producers[0].get("bytes_recv") or 0)
+        return int(producers[0].get("bytes_recv") or 0), consumers
 
-    async def async_park(self, name: str) -> None:
-        """Point the stream at a placeholder after a session ends.
+    async def async_park(self, name: str, source: str) -> None:
+        """Point the stream at a harmless source after a session ends.
 
         The registration is kept so the Home Assistant stream worker does not
-        hit a 404 while reconnecting. Leaving the expired Kinesis URL in place
-        is not an option either: anything that polls the stream makes go2rtc
-        launch ffmpeg against a dead URL, filling its log with 403s. A null
-        source accepts the connection and produces nothing.
+        hit a 404 while reconnecting, but the expired Kinesis URL cannot stay:
+        anything that polls the stream would make go2rtc launch ffmpeg against
+        a dead URL, filling its log with 403s. go2rtc rejects `null:`, so the
+        placeholder source is used instead — it costs nothing until something
+        actually connects.
         """
-        url = (
-            f"{self._base_url}/api/streams"
-            f"?name={quote(name, safe='')}&src={quote('null:', safe='')}"
-        )
         try:
-            async with self._session.put(url) as resp:
-                if resp.status >= 400:
-                    LOGGER.debug("Parking stream %s returned %s", name, resp.status)
-                else:
-                    LOGGER.debug("Parked stream %s", name)
-        except aiohttp.ClientError as err:
+            await self.async_publish_raw(name, source)
+        except Go2RtcError as err:
             LOGGER.debug("Parking stream %s failed: %s", name, err)
+        else:
+            LOGGER.debug("Parked stream %s", name)
 
     async def async_delete(self, name: str) -> None:
         """Remove the stream.

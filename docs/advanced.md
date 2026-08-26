@@ -91,7 +91,166 @@ same URL, which then receives zero bytes.
 the current URL still works. Publishing each fresh URL to go2rtc tears down the
 running ffmpeg process, so doing that every 26 seconds destroys the stream on a
 loop. The integration keeps the fresh URL aside and only publishes it once
-go2rtc's `bytes_recv` has failed to grow across two consecutive checks.
+go2rtc's `bytes_recv` has failed to grow across two consecutive checks, roughly
+50 seconds.
+
+Publishing that fresh URL has the same side effect as the initial swap: go2rtc
+ends the running ffmpeg process, the stream worker hits EOF and exits. The
+recovery path therefore calls `_async_restart_ha_stream()` as well. Every place
+that replaces the go2rtc source has to revive the worker; forgetting it in one
+of them looks like "the stream stops after a while".
+
+### Opening the stream on the first click
+
+Home Assistant allows `stream_source()` ten seconds, while waking the feeder
+takes twenty to ninety. Worse, the stream worker does **not** retry on failure
+unless `keepalive` is set, which it is not for an ordinary camera card, so
+returning an address that is not yet serving video fails outright.
+
+The way around both is a placeholder plus a controlled restart:
+
+1. `stream_source()` publishes a go2rtc source that produces frames instantly
+   and returns its RTSP address, so the worker attaches successfully.
+2. The session starts in the background.
+3. Once the feeder is streaming, the real source replaces the placeholder in
+   go2rtc and the integration calls `Stream.update_source()` with the same RTSP
+   address.
+
+`update_source` sets `_fast_restart_once`, which makes the worker loop restart
+rather than break out — the one path that bypasses the missing `keepalive`.
+
+That alone is not enough. Replacing the source in go2rtc ends the placeholder's
+producer, so the worker usually hits EOF and exits its thread before
+`update_source` arrives, and flagging a dead thread restarts nothing. The
+integration therefore also calls `Stream.start()`, which recreates the worker
+thread when it has exited and does nothing while it is still running.
+
+`Stream.start` is a coroutine in current Home Assistant and a plain method in
+older versions, so the result is awaited when it is awaitable. Getting this
+wrong is quiet: the call raises no error, Python only logs
+`coroutine 'Stream.start' was never awaited`, and the stream drops out a minute
+later when the worker fails again with nothing to revive it.
+Because the worker reconnects from scratch, the codec and resolution change
+between placeholder and live stream is harmless, and the HLS output continues
+on the same URL with a discontinuity marker.
+
+This requires go2rtc; without it there is no way to hand out a working source
+before the feeder is awake, and the first click still asks the viewer to retry.
+
+The swap is not free. It puts a discontinuity in the HLS output: new
+timestamps, new SPS/PPS. Home Assistant marks it correctly and its own decoder
+follows along — `stream.async_get_image()` keeps returning frames — but some
+browser players do not, and show a frozen picture while the timeline keeps
+advancing. Nothing in the integration can force the frontend to reopen the
+stream; it only restarts its player when the entity itself changes.
+
+Two configurations avoid the swap entirely. Continuous mode keeps the session
+running, so `stream_source()` returns the live address immediately and no
+placeholder is ever used. Turning `instant_start` off restores the two-click
+behaviour, which also yields one uninterrupted stream.
+The placeholder source is configurable, because go2rtc's virtual-source syntax
+may differ between versions. The default is
+`ffmpeg:virtual?video=testsrc&size=1536x2048#video=h264`.
+
+Two details matter. The trailing `#video=h264` is required: go2rtc accepts a
+virtual source without an encode step and then produces no frames at all. And
+the size must match what the feeder delivers (1536x2048 portrait) — a
+resolution change halfway through an HLS stream is a common reason for players
+to stall at the swap, even when the backend swapped correctly.
+
+If the picture still does not continue after `Stream worker restarted` appears
+in the log, the swap worked and the browser's player is the remaining problem.
+Clicking again is instant at that point, because the session is already live.
+
+Registering a stream through the go2rtc API succeeds even when the source is
+nonsense, so the integration probes `/api/frame.jpeg?src=<name>` afterwards.
+That forces go2rtc to start the source; if no frame comes back, the placeholder
+is abandoned and the viewer is asked to retry instead of being handed an
+address that 404s. Watch for `The placeholder source ... produces no video` in
+the log.
+
+To find a working source string for your go2rtc version, test it by hand:
+
+```bash
+curl -X PUT "http://GO2RTC:1984/api/streams?name=bbtest&src=$(python3 -c \
+  'import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1],safe=""))' \
+  'ffmpeg:virtual?video=testsrc&size=768x1024')"
+curl -s -o /tmp/f.jpg -w '%{http_code} %{size_download}\n' \
+  "http://GO2RTC:1984/api/frame.jpeg?src=bbtest"
+```
+
+A 200 with a non-zero size means the source works.
+
+The status sensor and prepare button remain useful for automations that want
+the feeder awake before anyone looks.
+
+### Preview images
+
+`async_camera_image` never wakes the feeder. It returns whatever the configured
+preview source yields, with the status drawn across the bottom by Pillow when
+the overlay is enabled. Pillow is imported softly: without it the image is
+returned uncaptioned rather than failing.
+
+Every status change and every newly stored frame calls `async_update_token()`
+before writing state. The camera card requests
+`/api/camera_proxy/<entity>?token=...`, and the browser only refetches when that
+URL changes; without rotating the token the card keeps showing a stale picture
+until Home Assistant restarts.
+
+The `last_frame` source keeps a still from the running stream, refreshed every
+`LAST_FRAME_INTERVAL` seconds through `stream.async_get_image()`. Frames are
+held in memory only, so the preview is empty until the first successful stream
+after a restart.
+
+The `entity` source reads `entity_picture` from another entity. Absolute URLs
+are fetched directly; local `/api/...` paths need authentication and are signed
+with `async_sign_path` first.
+
+### Ending the session promptly
+
+The auto-off timer counts from the moment the session starts, so on its own it
+leaves the feeder streaming for the remainder of the timer after the viewer
+closes the card. Each keepalive therefore also reads the `consumers` array from
+go2rtc; once it has been non-empty and then stays empty for
+`IDLE_CHECKS_BEFORE_STOP` checks, the session is torn down.
+
+The "has been non-empty" part matters: during the wake-up nobody is connected
+yet, and stopping then would kill the session being set up.
+
+This is off by default, and the reason is worth knowing. An empty consumer list
+means nobody is connected, which is also true for the window in which the
+Home Assistant stream worker has exited and not yet restarted. Acting on it
+then tears down a session someone is still watching. The auto-off timer is the
+reliable protection; this setting is a convenience with a sharp edge.
+
+It is also a floor rather than an instant stop: Home Assistant keeps its own
+`Stream` object alive for a while after the card closes, so its RTSP connection
+to go2rtc lingers and the consumer count stays at one until it times out.
+
+### Continuous mode and sleep
+
+With `continuous` enabled, a supervisor runs every `SUPERVISE_INTERVAL` seconds
+and restarts the session whenever it is not running. The auto-off timer and the
+unwatched-stop are both skipped, since neither makes sense when the point is to
+stay up.
+
+Before each attempt the supervisor reads the feeder's own state through
+`client.refresh()` and checks it against `STREAMABLE_FEEDER_STATES`
+(`READY_TO_STREAM`, `STREAMING`, `ONLINE`, `TAKING_POSTCARDS`). Anything else —
+most importantly `DEEP_SLEEP`, which the feeder enters by itself after dark, but
+also `OFFLINE`, `OFF_GRID` and the firmware and factory-reset states — means no
+stream can be started. The status sensor then reports `sleeping` with the raw
+state in its `detail` attribute, and the next attempt waits out
+`retry_interval`.
+
+An unrecognised state counts as streamable, so a state Bird Buddy adds later
+produces a failed attempt rather than a feeder that never streams again.
+
+Every attempt backs off by `retry_interval` whether it succeeded or not, which
+keeps a repeatedly failing start from spinning against the API.
+
+Turning the camera off holds the supervisor off too, so `camera.turn_off` means
+off until something turns it back on.
 
 ### Battery protection
 
@@ -118,6 +277,15 @@ Two deliberate choices:
 | go2rtc RTSP port | `go2rtc_rtsp_port` | 8554 | 1–65535 |
 | go2rtc ffmpeg template | `go2rtc_input` | empty | template name |
 | Transcode to H.264 | `transcode` | on | on/off |
+| Preview image | `preview_source` | `last_frame` | none / last_frame / entity / file |
+| Preview entity | `preview_entity` | empty | entity id |
+| Preview image file | `preview_file` | empty | absolute path |
+| Show status on the preview | `status_overlay` | on | on/off |
+| Open the stream on the first click | `instant_start` | on | on/off, needs go2rtc |
+| Stream continuously | `continuous` | off | on/off |
+| Retry every | `retry_interval` | 120 s | 30-3600 |
+| Stop when nobody is watching | `stop_when_unwatched` | off | on/off, needs go2rtc |
+| Placeholder source | `placeholder_source` | `ffmpeg:virtual?video=testsrc&size=768x1024` | go2rtc source, no spaces |
 
 Fixed timings, in `const.py`:
 
@@ -129,6 +297,10 @@ Fixed timings, in `const.py`:
 | `WARMUP_TIMEOUT` | 45 s | give up waiting for the playlist |
 | `STREAM_SOURCE_GRACE` | 8 s | stay under Home Assistant's 10 s limit |
 | `STALE_CHECKS_BEFORE_REPUBLISH` | 2 | stalled checks before a fresh URL |
+| `IDLE_CHECKS_BEFORE_STOP` | 4 | checks without viewers before stopping |
+| `SUPERVISE_INTERVAL` | 30 s | how often continuous mode checks the session |
+| `LAST_FRAME_INTERVAL` | 60 s | how often to grab a still while streaming |
+| `SIGNED_URL_TTL` | 60 s | validity of a signed URL for another entity's picture |
 
 ---
 
@@ -138,14 +310,34 @@ The Kinesis URL changes every session, so go2rtc cannot pick it up from a static
 configuration. The integration registers it through the API instead:
 
 ```
-PUT http://<go2rtc>:1984/api/streams?name=birdbuddy_<id>&src=ffmpeg:<url>#video=h264
+PATCH http://<go2rtc>:1984/api/streams?name=birdbuddy_<id>&src=ffmpeg:<url>#video=h264
 ```
+
+The verb is not interchangeable. **PUT creates a stream and appends another
+source to one that already exists; PATCH replaces the source.** Publishing with
+PUT throughout leaves the stream holding every source it was ever given — the
+placeholder plus each expired Kinesis URL — and go2rtc keeps retrying all of
+them and feeding consumers from the first that still works. The visible
+symptoms are a go2rtc log full of `403 Forbidden` and a placeholder that goes on
+playing after the live stream was handed over.
+
+The integration therefore PATCHes, and falls back to PUT only when PATCH
+reports the stream does not exist yet. Deleting and recreating would also work
+but leaves a window in which anything connecting gets a 404.
 
 Home Assistant then receives `rtsp://<go2rtc>:8554/birdbuddy_<id>` as the stream
 source. That address stays constant across the session; only what go2rtc fetches
 behind it changes.
 
-Two things worth knowing:
+**`PUT` adds a source, it does not replace one.** Publishing repeatedly leaves
+the stream holding every source it was ever given, and go2rtc feeds consumers
+from the first one that still works. In practice that meant the placeholder
+kept playing while the live stream sat unused behind it, and expired Kinesis
+URLs stayed around producing `403 Forbidden` in the go2rtc log. The integration
+therefore deletes the stream before publishing, and warns when it ever sees
+more than one source.
+
+Two more things worth knowing:
 
 **Streams added through the API are not written to `go2rtc.yaml`** and are gone
 after go2rtc restarts. That is expected. The integration checks on each stream
