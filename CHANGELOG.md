@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.2
+
+- Fix a start that never completed when a watching session was already running
+  on Bird Buddy's side, for instance after a Home Assistant restart or when the
+  mobile app left one behind. The server answered `ACTIVE` without handing out
+  a stream address, so the integration polled for the full ninety seconds and
+  then reported an error while the placeholder kept playing. Any stale session
+  is now cleared before starting, and an address-less `ACTIVE` gives up after
+  four attempts with a readable message
+- The status no longer stays on "error" once the feeder reports a state again
+
 ## 1.2.1
 
 - The status now says *why* no stream is possible, instead of only "idle" or

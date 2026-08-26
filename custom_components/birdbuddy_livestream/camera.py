@@ -748,10 +748,6 @@ class BirdBuddyCamera(Camera):
             return
         if self._start_task is not None and not self._start_task.done():
             return
-        # An error worth reading should not be overwritten by a routine poll.
-        if self._status == STATUS_ERROR:
-            return
-
         state = await self._watcher.async_feeder_state(self._feeder_id)
         if state is None:
             return

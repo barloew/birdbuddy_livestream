@@ -61,7 +61,15 @@ Four properties of the Bird Buddy API shaped most of the implementation.
 
 `watchingActiveKeep`, `watchingActiveStop` and `watchingCooldown` take **no**
 `feederId`. The watching session is bound to the account on the server, so only
-one can exist at a time. The integration serialises all access behind a lock and
+one can exist at a time.
+
+That session outlives Home Assistant. After a restart, or when the mobile app
+leaves one behind, the server still holds a session the integration knows
+nothing about — and starting on top of it answers `WatchingActiveResult` with
+`streamUrl` set to null. No amount of polling produces an address. Every start
+therefore sends `watchingActiveStop` and `watchingCooldown` first, and an
+address-less `ACTIVE` gives up after `ACTIVE_WITHOUT_URL_LIMIT` attempts rather
+than running out the clock. The integration serialises all access behind a lock and
 stops a running session before starting another. Watching in the mobile app at
 the same time will fight over the same session.
 

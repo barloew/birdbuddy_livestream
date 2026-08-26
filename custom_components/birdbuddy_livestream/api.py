@@ -12,6 +12,7 @@ import aiohttp
 from birdbuddy.client import BirdBuddy
 
 from .const import (
+    ACTIVE_WITHOUT_URL_LIMIT,
     DEFAULT_START_TIMEOUT,
     STREAMABLE_FEEDER_STATES,
     KEEPALIVE_INTERVAL,
@@ -112,8 +113,15 @@ class BirdBuddyWatcher:
                 )
                 await self._async_stop_locked()
 
+            # A session may still be running on the server that we do not know
+            # about: after a Home Assistant restart, or when the mobile app
+            # left one behind. Starting on top of it answers ACTIVE without a
+            # streamUrl, and no amount of polling produces one. Clear it first.
+            await self._async_reset_session()
+
             variables = {"startWatchingInput": {"feederId": feeder_id}}
             result = await self._request(WATCHING_START, variables, "watchingStartV2")
+            active_without_url = 0
 
             loop = asyncio.get_running_loop()
             deadline = loop.time() + timeout
@@ -132,11 +140,18 @@ class BirdBuddyWatcher:
                         "watching %s / state=%s", typename, watching.get("state")
                     )
 
-                if typename is None:
-                    # Bird Buddy occasionally answers without a recognisable
-                    # result type. Treat it as "not ready yet" and poll on
-                    # rather than failing the start.
-                    LOGGER.debug("Unrecognised watching result, polling on")
+                if typename == "WatchingActiveResult" and not watching.get("streamUrl"):
+                    # ACTIVE but no URL means the server considers a session to
+                    # be running while withholding its address. Polling will
+                    # not fix that; give up early with something readable.
+                    active_without_url += 1
+                    if active_without_url >= ACTIVE_WITHOUT_URL_LIMIT:
+                        await self._async_cooldown_locked()
+                        raise WatchingError(
+                            "Bird Buddy reports an active session but hands out "
+                            "no stream address. Close the Bird Buddy app and try "
+                            "again."
+                        )
 
                 if typename == "WatchingActiveResult" and watching.get("streamUrl"):
                     self._active = ActiveStream(
@@ -376,6 +391,21 @@ class BirdBuddyWatcher:
 
         await self._async_cooldown_locked()
         return (result or {}).get("imageUrls") or []
+
+    async def _async_reset_session(self) -> None:
+        """Clear any session the server still holds for this account.
+
+        Sent unconditionally, because the server-side session is not visible
+        from here; both mutations are harmless when there is nothing to stop.
+        """
+        for query, subscript in (
+            (WATCHING_STOP, "watchingActiveStop"),
+            (WATCHING_COOLDOWN, "watchingCooldown"),
+        ):
+            try:
+                await self._request(query, None, subscript)
+            except Exception:  # noqa: BLE001
+                LOGGER.debug("%s during reset failed", subscript, exc_info=True)
 
     async def _async_cooldown_locked(self) -> None:
         try:

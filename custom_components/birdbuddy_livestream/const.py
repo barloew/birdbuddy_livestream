@@ -242,3 +242,8 @@ STREAMABLE_FEEDER_STATES: Final = frozenset(
 # How often to read the feeder's own state while no session is running, so the
 # card and the sensor can say "asleep" rather than just "idle".
 STATE_POLL_INTERVAL: Final = 300
+
+# How many ACTIVE-without-a-URL answers to accept before giving up. The server
+# sometimes reports a session as running while withholding its address; polling
+# does not resolve that.
+ACTIVE_WITHOUT_URL_LIMIT: Final = 4
