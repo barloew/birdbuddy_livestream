@@ -13,6 +13,7 @@ from birdbuddy.client import BirdBuddy
 
 from .const import (
     ACTIVE_WITHOUT_URL_LIMIT,
+    KEEPALIVE_MISSES_BEFORE_LOST,
     DEFAULT_START_TIMEOUT,
     STREAMABLE_FEEDER_STATES,
     KEEPALIVE_INTERVAL,
@@ -61,8 +62,8 @@ class BirdBuddyWatcher:
         self._lock = asyncio.Lock()
         self._active: ActiveStream | None = None
         self._keepalive_task: asyncio.Task | None = None
+        self._keepalive_misses = 0
         self._lost_listeners: dict[str, Callable[[], None]] = {}
-        self._url_listeners: dict[str, Callable[[str], None]] = {}
 
     @property
     def client(self) -> BirdBuddy:
@@ -86,21 +87,17 @@ class BirdBuddyWatcher:
         """Register a callback for when the session is dropped."""
         self._lost_listeners[feeder_id] = callback
 
-    def register_url_listener(
-        self, feeder_id: str, callback: Callable[[str], None]
-    ) -> None:
-        """Register a callback for when a fresh stream URL arrives."""
-        self._url_listeners[feeder_id] = callback
-
     def unregister_listeners(self, feeder_id: str) -> None:
         """Remove all callbacks for a feeder."""
         self._lost_listeners.pop(feeder_id, None)
-        self._url_listeners.pop(feeder_id, None)
 
     # -- starting ----------------------------------------------------------
 
     async def async_start(
-        self, feeder_id: str, timeout: int = DEFAULT_START_TIMEOUT
+        self,
+        feeder_id: str,
+        timeout: int = DEFAULT_START_TIMEOUT,
+        clear_stale: bool = False,
     ) -> str:
         """Start the stream and return the HLS master playlist URL."""
         async with self._lock:
@@ -116,8 +113,13 @@ class BirdBuddyWatcher:
             # A session may still be running on the server that we do not know
             # about: after a Home Assistant restart, or when the mobile app
             # left one behind. Starting on top of it answers ACTIVE without a
-            # streamUrl, and no amount of polling produces one. Clear it first.
-            await self._async_reset_session()
+            # streamUrl, and no amount of polling produces one.
+            #
+            # Only done when the caller has reason to believe that is the case,
+            # because clearing costs a stop the feeder has to recover from.
+            if clear_stale:
+                LOGGER.info("Clearing a stale session before starting")
+                await self._async_reset_session()
 
             variables = {"startWatchingInput": {"feederId": feeder_id}}
             result = await self._request(WATCHING_START, variables, "watchingStartV2")
@@ -278,22 +280,37 @@ class BirdBuddyWatcher:
             state = (result or {}).get("state")
             LOGGER.debug("Keepalive: state=%s", state)
 
+            if state is None:
+                # An answer without a state is not the same as a session that
+                # ended. Dropping the session on one unreadable reply used to
+                # tear everything down and set the supervisor restarting.
+                self._keepalive_misses += 1
+                if self._keepalive_misses >= KEEPALIVE_MISSES_BEFORE_LOST:
+                    LOGGER.info("Keepalive returned no state repeatedly, giving up")
+                    self._notify_lost()
+                    return
+                continue
+
+            self._keepalive_misses = 0
+
             if state != "ACTIVE":
                 LOGGER.info("Session is now %s, keepalive stops", state)
                 self._notify_lost()
                 return
 
-            await self._async_refresh_url()
+    async def async_refresh_stream_url(self) -> str | None:
+        """Fetch a fresh stream URL for the running session.
 
-    async def _async_refresh_url(self) -> None:
-        """Fetch a fresh stream URL and hand it to the listener when it changes.
-
-        The Kinesis URL is a temporary session address. Once it expires it is
-        dead for good and reconnecting does not help; whoever keeps using it
-        ends up with an ffmpeg process that receives zero bytes.
+        The Kinesis URL is a temporary session address that dies for good once
+        it expires, and go2rtc only starts pulling it when a viewer connects.
+        A URL published minutes earlier is therefore likely to be stale by the
+        time anyone watches, which is why this is called just before handing
+        the address out and again when the source stalls, rather than on a
+        timer. watchingStartCheck is a mutation; firing it every keepalive put
+        the feeder under constant needless load.
         """
         if self._active is None:
-            return
+            return None
 
         feeder_id = self._active.feeder_id
         variables = {"startWatchingInput": {"feederId": feeder_id}}
@@ -306,21 +323,20 @@ class BirdBuddyWatcher:
             raise
         except Exception as err:  # noqa: BLE001
             LOGGER.debug("Could not fetch a fresh URL: %s", err)
-            return
+            return None
 
         if result.get("__typename") != "WatchingActiveResult":
-            return
+            LOGGER.debug("No fresh URL: %s", result.get("__typename"))
+            return None
 
         watching = result.get("watching") or {}
         fresh = watching.get("streamUrl")
-        if not fresh or self._active is None or fresh == self._active.stream_url:
-            return
+        if not fresh or self._active is None:
+            return None
 
         LOGGER.debug("Fresh stream URL received for %s", feeder_id)
         self._active.stream_url = fresh
-
-        if (callback := self._url_listeners.get(feeder_id)) is not None:
-            callback(fresh)
+        return fresh
 
     def _notify_lost(self) -> None:
         """The server dropped the session."""
@@ -393,19 +409,16 @@ class BirdBuddyWatcher:
         return (result or {}).get("imageUrls") or []
 
     async def _async_reset_session(self) -> None:
-        """Clear any session the server still holds for this account.
+        """Release a session the server still holds for this account.
 
-        Sent unconditionally, because the server-side session is not visible
-        from here; both mutations are harmless when there is nothing to stop.
+        Only watchingActiveStop is sent. watchingCooldown belongs at the end of
+        a session, and sending it just before a start puts the feeder into a
+        cooldown it then refuses to stream out of, answering UNSPECIFIED.
         """
-        for query, subscript in (
-            (WATCHING_STOP, "watchingActiveStop"),
-            (WATCHING_COOLDOWN, "watchingCooldown"),
-        ):
-            try:
-                await self._request(query, None, subscript)
-            except Exception:  # noqa: BLE001
-                LOGGER.debug("%s during reset failed", subscript, exc_info=True)
+        try:
+            await self._request(WATCHING_STOP, None, "watchingActiveStop")
+        except Exception:  # noqa: BLE001
+            LOGGER.debug("watchingActiveStop during reset failed", exc_info=True)
 
     async def _async_cooldown_locked(self) -> None:
         try:

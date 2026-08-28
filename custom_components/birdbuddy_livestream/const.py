@@ -247,3 +247,12 @@ STATE_POLL_INTERVAL: Final = 300
 # sometimes reports a session as running while withholding its address; polling
 # does not resolve that.
 ACTIVE_WITHOUT_URL_LIMIT: Final = 4
+
+# Keepalive answers without a state are tolerated this many times before the
+# session is considered gone. One unreadable reply is not an ended session.
+KEEPALIVE_MISSES_BEFORE_LOST: Final = 3
+
+# How often to check whether the go2rtc source is still delivering, while a
+# session is running.
+HEALTH_INTERVAL: Final = 30
+

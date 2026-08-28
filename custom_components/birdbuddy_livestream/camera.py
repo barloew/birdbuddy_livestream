@@ -44,6 +44,7 @@ from .const import (
     DEFAULT_STOP_WHEN_UNWATCHED,
     DEFAULT_TRANSCODE,
     DOMAIN,
+    HEALTH_INTERVAL,
     IDLE_CHECKS_BEFORE_STOP,
     LAST_FRAME_INTERVAL,
     PLACEHOLDER_PROBE_TIMEOUT,
@@ -134,14 +135,15 @@ class BirdBuddyCamera(Camera):
         self._last_error: str | None = None
         # Latest URL supplied by the watcher, plus the measurements used to
         # decide whether go2rtc is still receiving data.
-        self._pending_hls: str | None = None
         self._last_bytes: int | None = None
         self._stale_count = 0
         self._seen_viewer = False
         self._idle_count = 0
         self._cancel_supervisor: Any = None
         self._cancel_state_poll: Any = None
+        self._cancel_health: Any = None
         self._retry_after = 0.0
+        self._fail_count = 0
         # Home Assistant calls stream_source() while the entity is being added,
         # to work out which WebRTC provider fits. Without this flag every
         # restart would wake the feeder.
@@ -307,7 +309,10 @@ class BirdBuddyCamera(Camera):
             return self._stream_url
 
         if self._session_active and self._stream_url:
-            await self._async_ensure_go2rtc_stream()
+            # go2rtc only starts pulling when a viewer connects, so whatever
+            # URL was published earlier has been sitting unused and is likely
+            # stale. Refresh it now, at the one moment it is about to matter.
+            await self._async_refresh_source()
             self._schedule_auto_off()
             return self._stream_url
 
@@ -401,7 +406,6 @@ class BirdBuddyCamera(Camera):
         self._watcher.register_lost_listener(
             self._feeder_id, self._handle_session_lost
         )
-        self._watcher.register_url_listener(self._feeder_id, self._handle_fresh_url)
         self._preview.update_options(dict(self._entry.options))
         self._async_refresh_preview()
 
@@ -445,6 +449,11 @@ class BirdBuddyCamera(Camera):
         # Check first, so a sleeping feeder is reported as such instead of as a
         # ninety-second timeout.
         state = await self._watcher.async_feeder_state(self._feeder_id)
+
+        # STREAMING while we hold no session means the server kept one from an
+        # earlier run; that one has to be released before a new start works.
+        clear_stale = state == "STREAMING" and not self._session_active
+
         if not self._watcher.is_streamable(state):
             LOGGER.info(
                 "Feeder %s reports %s, no livestream possible",
@@ -460,12 +469,15 @@ class BirdBuddyCamera(Camera):
         self._set_status(STATUS_WAKING)
         try:
             self._stream_url = await self._watcher.async_start(
-                self._feeder_id, timeout=self._start_timeout
+                self._feeder_id,
+                timeout=self._start_timeout,
+                clear_stale=clear_stale,
             )
         except WatchingError as err:
             self._stream_url = None
             self._last_error = str(err)
             LOGGER.error("Could not start the livestream: %s", err)
+            self._fail_count += 1
             self._set_status(STATUS_ERROR, str(err))
         except Exception as err:  # noqa: BLE001
             self._stream_url = None
@@ -474,11 +486,13 @@ class BirdBuddyCamera(Camera):
             self._set_status(STATUS_ERROR, str(err))
         else:
             self._last_error = None
+            self._fail_count = 0
             LOGGER.info("Livestream active for feeder %s", self._feeder_id)
             await self._async_publish_to_go2rtc()
             self._async_restart_ha_stream()
             self._schedule_auto_off()
             self._start_frame_grabs()
+            self._start_health_checks()
             self._set_status(STATUS_STREAMING)
         finally:
             self._async_refresh_preview()
@@ -588,53 +602,49 @@ class BirdBuddyCamera(Camera):
         else:
             LOGGER.debug("Stream worker restarted")
 
-    async def _async_ensure_go2rtc_stream(self) -> None:
-        """Re-register the stream if go2rtc has forgotten it.
-
-        Streams added through the API do not end up in go2rtc.yaml, so they are
-        gone after go2rtc restarts.
-        """
-        if self._go2rtc is None:
-            return
-        if not self._stream_url or not self._stream_url.startswith("rtsp://"):
+    @callback
+    def _start_health_checks(self) -> None:
+        """Watch the go2rtc source for as long as the session runs."""
+        if self._go2rtc is None or self._cancel_health is not None:
             return
 
-        session = self._watcher.active
-        if session is None:
-            return
-
-        if await self._go2rtc.async_exists(self._go2rtc_name):
-            return
-
-        LOGGER.info("go2rtc no longer knows the stream, publishing it again")
-        self._stream_url = session.stream_url
-        await self._async_publish_to_go2rtc()
+        self._cancel_health = async_track_time_interval(
+            self.hass,
+            self._async_health_check,
+            timedelta(seconds=HEALTH_INTERVAL),
+        )
 
     @callback
-    def _handle_fresh_url(self, hls_url: str) -> None:
-        """Store a new Kinesis URL from the watcher.
+    def _stop_health_checks(self) -> None:
+        if self._cancel_health is not None:
+            self._cancel_health()
+            self._cancel_health = None
 
-        watchingStartCheck returns a new SessionToken on every call, even when
-        the previous one still works. Publishing immediately would make go2rtc
-        tear down the running ffmpeg process every 26 seconds, so the URL is
-        kept aside and only used once the source actually stalls.
-        """
-        self._pending_hls = hls_url
+    async def _async_health_check(self, _now: Any) -> None:
+        """Periodic check that the source is still delivering."""
+        if not self._session_active:
+            return
+        await self._async_check_producer()
+
+    async def _async_refresh_source(self) -> bool:
+        """Fetch a fresh Kinesis URL and put it behind the RTSP address."""
+        fresh = await self._watcher.async_refresh_stream_url()
+        if not fresh:
+            LOGGER.debug("No fresh URL available, keeping the current one")
+            return False
 
         if self._go2rtc is None:
-            # Without go2rtc, Home Assistant watches Kinesis directly and
-            # stream_source() supplies the fresh URL on the next stream.
-            self._stream_url = hls_url
-            return
+            # Without go2rtc, Home Assistant reads Kinesis directly and the
+            # fresh URL is what stream_source() should hand back.
+            self._stream_url = fresh
+            return True
 
-        self.hass.async_create_task(
-            self._async_check_producer(),
-            name=f"{DOMAIN} health {self._feeder_id}",
-        )
+        await self._async_republish(fresh)
+        return True
 
     async def _async_check_producer(self) -> None:
         """Watch the go2rtc stream: republish when stalled, stop when unwatched."""
-        if self._go2rtc is None or self._pending_hls is None:
+        if self._go2rtc is None:
             return
 
         current, consumers = await self._go2rtc.async_activity(self._go2rtc_name)
@@ -660,10 +670,10 @@ class BirdBuddyCamera(Camera):
         self._last_bytes = current
 
         if self._stale_count >= STALE_CHECKS_BEFORE_REPUBLISH:
-            LOGGER.info("go2rtc receives nothing, publishing a fresh URL")
+            LOGGER.info("go2rtc receives nothing, fetching a fresh URL")
             self._stale_count = 0
             self._last_bytes = None
-            await self._async_republish(self._pending_hls)
+            await self._async_refresh_source()
 
     async def _async_check_viewers(self, consumers: int) -> bool:
         """Stop the session once nobody is watching. Returns True if stopped.
@@ -816,8 +826,14 @@ class BirdBuddyCamera(Camera):
         )
         self._may_wake_feeder = True
         self._async_ensure_start_task()
-        # Back off regardless, so a failing start cannot spin.
-        self._retry_after = loop.time() + self._retry_interval
+
+        # Back off regardless, so a failing start cannot spin, and back off
+        # further the longer it keeps failing. A feeder that refuses at one in
+        # the morning is unlikely to change its mind two minutes later.
+        backoff = self._retry_interval * min(2 ** self._fail_count, 8)
+        self._retry_after = loop.time() + backoff
+        if self._fail_count:
+            LOGGER.debug("Next attempt in %ss", backoff)
 
     # -- last frame --------------------------------------------------------
 
@@ -873,6 +889,7 @@ class BirdBuddyCamera(Camera):
         """The watcher reports that the server dropped the session."""
         LOGGER.info("Session for %s was dropped", self._feeder_id)
         self._stop_frame_grabs()
+        self._stop_health_checks()
         self._stream_url = None
         if self._cancel_auto_off is not None:
             self._cancel_auto_off()
@@ -918,8 +935,8 @@ class BirdBuddyCamera(Camera):
         self._start_task = None
 
         self._stop_frame_grabs()
+        self._stop_health_checks()
         self._stream_url = None
-        self._pending_hls = None
         self._last_bytes = None
         self._stale_count = 0
         self._seen_viewer = False

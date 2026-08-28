@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.2.4
+
+Three faults that reinforced each other, most visible in continuous mode: the
+feeder was woken over and over, yet asking for the livestream gave nothing while
+the Bird Buddy app worked fine.
+
+- **The published URL went stale.** go2rtc only starts pulling once a viewer
+  connects, so in continuous mode the Kinesis URL sat unused until it expired.
+  Clicking the camera then started ffmpeg against a dead address. The URL is now
+  refreshed at the two moments it matters — just before the address is handed
+  out, and when the source stalls — instead of on a timer
+- **`watchingStartCheck` was called on every keepalive**, every 26 seconds. It
+  is a mutation, and firing it that often put the feeder under constant needless
+  load without achieving anything
+- **A keepalive answer without a state ended the session.** One unreadable reply
+  tore everything down and set the supervisor restarting, which is what produced
+  the endless wake-up loop. Three consecutive misses are now needed
+
+## 1.2.3
+
+- Fix every start being refused with `UNSPECIFIED` after 1.2.2. Clearing a
+  stale session sent `watchingCooldown` as well, which puts the feeder into a
+  cooldown it then declines to stream out of. Only `watchingActiveStop` is sent
+  now, and only when the feeder reports `STREAMING` while the integration holds
+  no session
+- Continuous mode backs off further after each failed start, up to eight times
+  the retry interval, instead of retrying at the same pace all night
+
 ## 1.2.2
 
 - Fix a start that never completed when a watching session was already running

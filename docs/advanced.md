@@ -66,10 +66,15 @@ one can exist at a time.
 That session outlives Home Assistant. After a restart, or when the mobile app
 leaves one behind, the server still holds a session the integration knows
 nothing about — and starting on top of it answers `WatchingActiveResult` with
-`streamUrl` set to null. No amount of polling produces an address. Every start
-therefore sends `watchingActiveStop` and `watchingCooldown` first, and an
-address-less `ACTIVE` gives up after `ACTIVE_WITHOUT_URL_LIMIT` attempts rather
-than running out the clock. The integration serialises all access behind a lock and
+`streamUrl` set to null. No amount of polling produces an address. A start therefore
+sends `watchingActiveStop` first when the feeder reports `STREAMING` while the
+integration holds no session, and an address-less `ACTIVE` gives up after
+`ACTIVE_WITHOUT_URL_LIMIT` attempts rather than running out the clock.
+
+Only the stop, never `watchingCooldown`. Cooldown belongs at the end of a
+session; sending it just before a start puts the feeder into a cooldown it then
+refuses to stream out of, answering `WatchingFailedResult` with
+`failedReason: UNSPECIFIED` on every subsequent attempt. The integration serialises all access behind a lock and
 stops a running session before starting another. Watching in the mobile app at
 the same time will fight over the same session.
 
@@ -98,9 +103,16 @@ same URL, which then receives zero bytes.
 `watchingStartCheck` returns a fresh `SessionToken` on **every** call, even when
 the current URL still works. Publishing each fresh URL to go2rtc tears down the
 running ffmpeg process, so doing that every 26 seconds destroys the stream on a
-loop. The integration keeps the fresh URL aside and only publishes it once
-go2rtc's `bytes_recv` has failed to grow across two consecutive checks, roughly
-50 seconds.
+loop. Refreshing it on a timer is the wrong shape, for two reasons. `watchingStartCheck`
+is a mutation, so calling it every keepalive puts the feeder under constant load
+for nothing. And go2rtc only starts pulling a source once a viewer connects, so
+in continuous mode the published URL sits unused and expires quietly — the
+symptom being a camera that gives no picture while the Bird Buddy app works
+fine.
+
+The URL is therefore refreshed at exactly two moments: in `stream_source()`,
+just before the RTSP address is handed to a viewer, and when `bytes_recv` has
+failed to grow across two consecutive health checks.
 
 Publishing that fresh URL has the same side effect as the initial swap: go2rtc
 ends the running ffmpeg process, the stream worker hits EOF and exits. The
@@ -315,6 +327,8 @@ Fixed timings, in `const.py`:
 | `IDLE_CHECKS_BEFORE_STOP` | 4 | checks without viewers before stopping |
 | `SUPERVISE_INTERVAL` | 30 s | how often continuous mode checks the session |
 | `STATE_POLL_INTERVAL` | 300 s | how often the feeder state is read while idle |
+| `HEALTH_INTERVAL` | 30 s | how often the go2rtc source is checked while streaming |
+| `KEEPALIVE_MISSES_BEFORE_LOST` | 3 | stateless keepalive replies tolerated |
 | `LAST_FRAME_INTERVAL` | 60 s | how often to grab a still while streaming |
 | `SIGNED_URL_TTL` | 60 s | validity of a signed URL for another entity's picture |
 
