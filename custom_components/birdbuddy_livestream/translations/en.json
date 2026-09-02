@@ -85,7 +85,8 @@
           "warming_up": "Warming up",
           "streaming": "Streaming",
           "error": "Error",
-          "sleeping": "Asleep"
+          "sleeping": "Asleep",
+          "not_ready": "Not ready"
         }
       }
     },

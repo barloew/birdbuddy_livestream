@@ -54,6 +54,7 @@ from .const import (
     STATE_POLL_INTERVAL,
     STATUS_ERROR,
     STATUS_IDLE,
+    STATUS_NOT_READY,
     STATUS_SLEEPING,
     STATUS_STREAMING,
     STATUS_WAKING,
@@ -92,6 +93,16 @@ async def async_setup_entry(
         entities.append(BirdBuddyCamera(hass, entry, watcher, feeder, go2rtc))
 
     async_add_entities(entities)
+
+
+def _status_for(state: str | None) -> str:
+    """Map a blocking feeder state onto a status.
+
+    Only actual sleep is reported as sleep. Calling a feeder with its camera
+    module removed "asleep" sent one user looking for a problem that was not
+    there.
+    """
+    return STATUS_SLEEPING if state == "DEEP_SLEEP" else STATUS_NOT_READY
 
 
 @callback
@@ -136,6 +147,7 @@ class BirdBuddyCamera(Camera):
         # Latest URL supplied by the watcher, plus the measurements used to
         # decide whether go2rtc is still receiving data.
         self._last_bytes: int | None = None
+        self._last_producer: Any = None
         self._stale_count = 0
         self._seen_viewer = False
         self._idle_count = 0
@@ -144,6 +156,7 @@ class BirdBuddyCamera(Camera):
         self._cancel_health: Any = None
         self._retry_after = 0.0
         self._fail_count = 0
+        self._verified_placeholder: str | None = None
         # Home Assistant calls stream_source() while the entity is being added,
         # to work out which WebRTC provider fits. Without this flag every
         # restart would wake the feeder.
@@ -297,9 +310,10 @@ class BirdBuddyCamera(Camera):
     async def stream_source(self) -> str | None:
         """Return the stream URL, waking the feeder in the background if needed.
 
-        Home Assistant aborts this call after 10s, while a sleeping feeder can
-        take up to a minute. The session is therefore started as a background
-        task and only waited on briefly.
+        Home Assistant aborts this call after 10s, while a sleeping feeder
+        needs twenty to ninety. With a placeholder available the address goes
+        out immediately and the feeder wakes behind it; without one there is
+        nothing to do but wait briefly and ask the viewer to try again.
         """
         if not self._may_wake_feeder:
             LOGGER.debug(
@@ -317,6 +331,20 @@ class BirdBuddyCamera(Camera):
             return self._stream_url
 
         LOGGER.debug("stream_source() requested for %s", self._feeder_id)
+
+        if self._instant_start:
+            # Hand over the holding pattern straight away. Waking the feeder
+            # takes twenty to ninety seconds, so waiting first only delays the
+            # picture; nothing is gained by hoping it beats the deadline. Once
+            # the feeder is ready, _async_start_session swaps the go2rtc source
+            # and calls Stream.update_source, which restarts the worker on the
+            # same RTSP address.
+            placeholder = await self._async_publish_placeholder()
+            if placeholder is not None:
+                self._async_ensure_start_task()
+                return placeholder
+
+        # No placeholder to fall back on, so wait briefly and hope.
         task = self._async_ensure_start_task()
 
         try:
@@ -330,16 +358,6 @@ class BirdBuddyCamera(Camera):
                 self._feeder_id,
             )
             self._set_status(STATUS_WARMING_UP)
-
-            if self._instant_start:
-                # Give the stream worker a source that already produces frames.
-                # Once the feeder is ready, _async_start_session swaps the go2rtc
-                # source and calls Stream.update_source, which restarts the
-                # worker on the same RTSP address.
-                placeholder = await self._async_publish_placeholder()
-                if placeholder is not None:
-                    return placeholder
-
             raise HomeAssistantError(
                 "The Bird Buddy is waking up. Try again in about half a minute."
             ) from None
@@ -462,7 +480,7 @@ class BirdBuddyCamera(Camera):
             )
             self._stream_url = None
             self._last_error = f"The feeder is not available ({state})"
-            self._set_status(STATUS_SLEEPING, state)
+            self._set_status(_status_for(state), state)
             self._async_refresh_preview()
             return
 
@@ -540,6 +558,16 @@ class BirdBuddyCamera(Camera):
         # Registering always succeeds, even for a source go2rtc cannot start.
         # Handing Home Assistant an address that then 404s is worse than asking
         # the user to try again, because its stream worker does not retry.
+        #
+        # Probed once per source string: the check costs seconds that now come
+        # straight out of the ten Home Assistant allows, and a source that
+        # produced frames a moment ago will produce them again.
+        if self._verified_placeholder == self._placeholder_source:
+            LOGGER.info(
+                "Placeholder running while feeder %s wakes up", self._feeder_id
+            )
+            return url
+
         if not await self._go2rtc.async_can_produce(
             self._go2rtc_name, PLACEHOLDER_PROBE_TIMEOUT
         ):
@@ -550,6 +578,7 @@ class BirdBuddyCamera(Camera):
             )
             return None
 
+        self._verified_placeholder = self._placeholder_source
         LOGGER.info("Placeholder running while feeder %s wakes up", self._feeder_id)
         return url
 
@@ -647,7 +676,9 @@ class BirdBuddyCamera(Camera):
         if self._go2rtc is None:
             return
 
-        current, consumers = await self._go2rtc.async_activity(self._go2rtc_name)
+        current, consumers, producer = await self._go2rtc.async_activity(
+            self._go2rtc_name
+        )
 
         if await self._async_check_viewers(consumers):
             return
@@ -656,6 +687,18 @@ class BirdBuddyCamera(Camera):
             # No producer: go2rtc only starts one once someone connects, so
             # this is normal while nobody is watching. Just reset the counter.
             self._last_bytes = None
+            self._last_producer = None
+            self._stale_count = 0
+            return
+
+        if producer != self._last_producer:
+            # go2rtc restarted the source, so its byte counter started over.
+            # Comparing the new count against the old one reads as a stall and
+            # triggers a republish, which restarts the producer again: a loop
+            # that keeps interrupting a perfectly healthy stream.
+            LOGGER.debug("go2rtc producer changed, restarting the byte count")
+            self._last_producer = producer
+            self._last_bytes = current
             self._stale_count = 0
             return
 
@@ -673,6 +716,7 @@ class BirdBuddyCamera(Camera):
             LOGGER.info("go2rtc receives nothing, fetching a fresh URL")
             self._stale_count = 0
             self._last_bytes = None
+            self._last_producer = None
             await self._async_refresh_source()
 
     async def _async_check_viewers(self, consumers: int) -> bool:
@@ -766,7 +810,7 @@ class BirdBuddyCamera(Camera):
             self._set_status(STATUS_IDLE)
         else:
             LOGGER.debug("Feeder %s reports %s", self._feeder_id, state)
-            self._set_status(STATUS_SLEEPING, state)
+            self._set_status(_status_for(state), state)
 
     # -- continuous mode ---------------------------------------------------
 
@@ -815,7 +859,7 @@ class BirdBuddyCamera(Camera):
             LOGGER.debug(
                 "Feeder %s is %s, not starting a stream", self._feeder_id, state
             )
-            self._set_status(STATUS_SLEEPING, state)
+            self._set_status(_status_for(state), state)
             self._retry_after = loop.time() + self._retry_interval
             return
 
@@ -938,6 +982,7 @@ class BirdBuddyCamera(Camera):
         self._stop_health_checks()
         self._stream_url = None
         self._last_bytes = None
+        self._last_producer = None
         self._stale_count = 0
         self._seen_viewer = False
         self._idle_count = 0

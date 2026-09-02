@@ -8,6 +8,7 @@ on every start, and Home Assistant is pointed at go2rtc.
 from __future__ import annotations
 
 import logging
+from typing import Any
 from urllib.parse import quote, urlparse
 
 import aiohttp
@@ -18,6 +19,23 @@ LOGGER = logging.getLogger(__name__)
 # go into the URL. They are not needed either: go2rtc restarts the ffmpeg
 # process itself once it exits. Anyone who does want custom flags can define a
 # template in go2rtc.yaml and reference it by name; see the README.
+
+
+def _normalise(base_url: str) -> str:
+    """Accept an address with or without a scheme and port.
+
+    "192.168.1.10" is what people type; aiohttp rejects it outright, which
+    surfaces as an unhelpful "go2rtc is unreachable".
+    """
+    url = base_url.strip().rstrip("/")
+    if not url:
+        return url
+    if "://" not in url:
+        url = f"http://{url}"
+    parsed = urlparse(url)
+    if parsed.port is None:
+        url = f"{url}:1984"
+    return url
 
 
 class Go2RtcError(Exception):
@@ -35,7 +53,7 @@ class Go2RtcClient:
     ) -> None:
         """Initialise the client."""
         self._session = session
-        self._base_url = base_url.rstrip("/")
+        self._base_url = _normalise(base_url)
         self._rtsp_port = rtsp_port
 
     @property
@@ -181,12 +199,13 @@ class Go2RtcClient:
         LOGGER.debug("Frame probe for %s returned %d bytes", name, len(data))
         return True
 
-    async def async_activity(self, name: str) -> tuple[int | None, int]:
-        """Return how many bytes the source received and how many clients watch.
+    async def async_activity(self, name: str) -> tuple[int | None, int, Any]:
+        """Return bytes received, viewer count and the producer's identity.
 
-        A byte count of None means no producer is running. A count that stops
-        growing means the source has stalled. Zero consumers means nobody is
-        watching, so the feeder can go back to sleep.
+        A byte count of None means no producer is running. Zero consumers means
+        nobody is watching. The identity matters because go2rtc restarts the
+        producer whenever the source changes, and its byte counter starts over
+        at zero: without noticing the restart, that reads as a stall.
         """
         url = f"{self._base_url}/api/streams?src={quote(name, safe='')}"
         try:

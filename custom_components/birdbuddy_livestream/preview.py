@@ -30,6 +30,7 @@ from .const import (
     PREVIEW_NONE,
     SIGNED_URL_TTL,
     STATUS_ERROR,
+    STATUS_NOT_READY,
     STATUS_SLEEPING,
     STATUS_STREAMING,
     STATUS_WAKING,
@@ -44,7 +45,8 @@ OVERLAY_TEXT: dict[str, str] = {
     STATUS_WAKING: "Waking up the feeder...",
     STATUS_WARMING_UP: "Almost there...",
     STATUS_STREAMING: "Live",
-    STATUS_SLEEPING: "Feeder unavailable",
+    STATUS_SLEEPING: "Feeder is asleep",
+    STATUS_NOT_READY: "Feeder unavailable",
     STATUS_ERROR: "Livestream unavailable",
 }
 
@@ -55,7 +57,7 @@ FEEDER_STATE_TEXT: dict[str, str] = {
     "DEEP_SLEEP": "Feeder is asleep",
     "OFFLINE": "Feeder is offline",
     "OFF_GRID": "Feeder is off-grid",
-    "OUT_OF_FEEDER": "Feeder module removed",
+    "OUT_OF_FEEDER": "Camera out of the feeder",
     "FIRMWARE_UPDATE": "Updating firmware",
     "PENDING_FACTORY_RESET": "Factory reset pending",
     "PENDING_REMOVAL": "Removal pending",

@@ -85,7 +85,8 @@
           "warming_up": "Warmloopfase",
           "streaming": "Streamt",
           "error": "Fout",
-          "sleeping": "Slaapstand"
+          "sleeping": "Slaapstand",
+          "not_ready": "Niet gereed"
         }
       }
     },

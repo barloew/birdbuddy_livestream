@@ -165,6 +165,7 @@ STATUS_WARMING_UP: Final = "warming_up"
 STATUS_STREAMING: Final = "streaming"
 STATUS_ERROR: Final = "error"
 STATUS_SLEEPING: Final = "sleeping"
+STATUS_NOT_READY: Final = "not_ready"
 
 STATUSES: Final = [
     STATUS_IDLE,
@@ -172,6 +173,7 @@ STATUSES: Final = [
     STATUS_WARMING_UP,
     STATUS_STREAMING,
     STATUS_SLEEPING,
+    STATUS_NOT_READY,
     STATUS_ERROR,
 ]
 
@@ -232,11 +234,23 @@ DEFAULT_RETRY_INTERVAL: Final = 120
 # How often the supervisor checks that the session is still up.
 SUPERVISE_INTERVAL: Final = 30
 
-# Feeder states from which a livestream can be started. Everything else means
-# the feeder is asleep, offline, updating or otherwise unavailable; the feeder
-# goes into DEEP_SLEEP by itself at night.
-STREAMABLE_FEEDER_STATES: Final = frozenset(
-    {"READY_TO_STREAM", "STREAMING", "ONLINE", "TAKING_POSTCARDS"}
+# Feeder states that genuinely rule out a livestream. Everything else is worth
+# attempting, including states we have not seen before.
+#
+# This is a blocklist rather than a list of allowed states on purpose. An
+# earlier version listed what was permitted, and refused to stream a feeder
+# reporting OUT_OF_FEEDER — which the Bird Buddy app streamed from perfectly
+# well. The server is the authority on whether a stream can start; the feeder
+# state is for explaining a refusal, not for pre-empting one.
+NON_STREAMABLE_FEEDER_STATES: Final = frozenset(
+    {
+        "DEEP_SLEEP",
+        "OFFLINE",
+        "FIRMWARE_UPDATE",
+        "FACTORY_RESET",
+        "PENDING_FACTORY_RESET",
+        "PENDING_REMOVAL",
+    }
 )
 
 # How often to read the feeder's own state while no session is running, so the

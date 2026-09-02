@@ -114,6 +114,13 @@ The URL is therefore refreshed at exactly two moments: in `stream_source()`,
 just before the RTSP address is handed to a viewer, and when `bytes_recv` has
 failed to grow across two consecutive health checks.
 
+Detecting that second case needs care. go2rtc restarts the producer whenever the
+source changes, and the new producer's `bytes_recv` starts at zero, which
+against the previous count looks exactly like a stall — and the republish that
+follows restarts the producer once more, resetting the counter again. The health
+check therefore also reads the producer's `id` and treats a change as "counter
+restarted" rather than "source stalled".
+
 Publishing that fresh URL has the same side effect as the initial swap: go2rtc
 ends the running ffmpeg process, the stream worker hits EOF and exits. The
 recovery path therefore calls `_async_restart_ha_stream()` as well. Every place
@@ -130,7 +137,10 @@ returning an address that is not yet serving video fails outright.
 The way around both is a placeholder plus a controlled restart:
 
 1. `stream_source()` publishes a go2rtc source that produces frames instantly
-   and returns its RTSP address, so the worker attaches successfully.
+   and returns its RTSP address, so the worker attaches successfully. This
+   happens straight away rather than after a grace period: an earlier version
+   waited `STREAM_SOURCE_GRACE` seconds first in case the feeder woke up
+   quickly, which it never does, so the wait only delayed the picture.
 2. The session starts in the background.
 3. Once the feeder is streaming, the real source replaces the placeholder in
    go2rtc and the integration calls `Stream.update_source()` with the same RTSP
@@ -184,6 +194,8 @@ Clicking again is instant at that point, because the session is already live.
 
 Registering a stream through the go2rtc API succeeds even when the source is
 nonsense, so the integration probes `/api/frame.jpeg?src=<name>` afterwards.
+Once a source string has produced a frame it is not probed again, because the
+probe costs seconds out of the ten Home Assistant allows.
 That forces go2rtc to start the source; if no frame comes back, the placeholder
 is abandoned and the viewer is asked to retry instead of being handed an
 address that 404s. Watch for `The placeholder source ... produces no video` in
@@ -262,16 +274,17 @@ as "the feeder is asleep". The reason is passed to the preview, which captions
 the image accordingly through `FEEDER_STATE_TEXT`.
 
 Before each attempt the supervisor reads the feeder's own state through
-`client.refresh()` and checks it against `STREAMABLE_FEEDER_STATES`
-(`READY_TO_STREAM`, `STREAMING`, `ONLINE`, `TAKING_POSTCARDS`). Anything else —
-most importantly `DEEP_SLEEP`, which the feeder enters by itself after dark, but
-also `OFFLINE`, `OFF_GRID` and the firmware and factory-reset states — means no
-stream can be started. The status sensor then reports `sleeping` with the raw
+`client.refresh()` and checks it against `NON_STREAMABLE_FEEDER_STATES`:
+`DEEP_SLEEP`, `OFFLINE`, `FIRMWARE_UPDATE`, `FACTORY_RESET`,
+`PENDING_FACTORY_RESET` and `PENDING_REMOVAL`.
+
+Deliberately a blocklist. An earlier version listed the permitted states
+instead, and so refused to stream a feeder reporting `OUT_OF_FEEDER` — which
+the Bird Buddy app streamed from without complaint. The server is the authority
+on whether a stream can start; the feeder state serves to explain a refusal,
+not to pre-empt one. An unrecognised state is therefore attempted. The status sensor then reports `sleeping` with the raw
 state in its `detail` attribute, and the next attempt waits out
 `retry_interval`.
-
-An unrecognised state counts as streamable, so a state Bird Buddy adds later
-produces a failed attempt rather than a feeder that never streams again.
 
 Every attempt backs off by `retry_interval` whether it succeeded or not, which
 keeps a repeatedly failing start from spinning against the API.

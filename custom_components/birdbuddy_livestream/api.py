@@ -15,7 +15,7 @@ from .const import (
     ACTIVE_WITHOUT_URL_LIMIT,
     KEEPALIVE_MISSES_BEFORE_LOST,
     DEFAULT_START_TIMEOUT,
-    STREAMABLE_FEEDER_STATES,
+    NON_STREAMABLE_FEEDER_STATES,
     KEEPALIVE_INTERVAL,
     POLL_INTERVAL,
     WARMUP_MIN_SEGMENTS,
@@ -370,14 +370,16 @@ class BirdBuddyWatcher:
 
     @staticmethod
     def is_streamable(state: str | None) -> bool:
-        """Whether a livestream can be started in this feeder state.
+        """Whether a livestream is worth attempting in this feeder state.
 
-        An unknown state counts as streamable: better to try and fail than to
-        refuse because Bird Buddy introduced a state we have not seen.
+        Only states that genuinely rule it out say no. Anything else, an
+        unknown state included, is attempted and left to the server to refuse:
+        OUT_OF_FEEDER streams perfectly well in the Bird Buddy app despite
+        sounding like it should not.
         """
         if state is None:
             return True
-        return state in STREAMABLE_FEEDER_STATES
+        return state not in NON_STREAMABLE_FEEDER_STATES
 
     # -- stopping ----------------------------------------------------------
 
